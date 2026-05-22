@@ -1,7 +1,6 @@
 import { Elysia } from 'elysia';
 import { AdminService } from './service';
 import { requireAuth, requirePermission } from '@/shared/auth/guards';
-import { ok } from '@/shared/http/response';
 
 export const adminController = new Elysia({ name: 'admin-controller' }).group('/admin', (app) =>
   app
@@ -12,7 +11,7 @@ export const adminController = new Elysia({ name: 'admin-controller' }).group('/
       const { headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
       requirePermission(user, 'orders.read');
-      return ok(await AdminService.ping());
+      return AdminService.ping();
     })
     /**
      * Read orders list in admin context (requires orders.read).
@@ -21,6 +20,6 @@ export const adminController = new Elysia({ name: 'admin-controller' }).group('/
       const { headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
       requirePermission(user, 'orders.read');
-      return ok(await AdminService.ping());
+      return AdminService.ping();
     })
 );
