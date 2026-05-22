@@ -1,11 +1,61 @@
 import { Elysia } from 'elysia';
+import { requireAuth } from '@/shared/auth/guards';
 import { PetsService } from './service';
 
 export const petsController = new Elysia({ name: 'pets-controller' }).group('/pets', (app) =>
   app
-    .get('', async () => PetsService.ping())
-    .post('', async () => PetsService.ping())
-    .get('/:id', async () => PetsService.ping())
-    .put('/:id', async () => PetsService.ping())
-    .delete('/:id', async () => PetsService.ping())
+    /** List all pets for authenticated user. */
+    .get('', async (ctx: any) => {
+      const { headers, jwt } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.list(authUser.id);
+    })
+    /** Create a pet profile. */
+    .post('', async (ctx: any) => {
+      const { headers, jwt, body } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.create(authUser.id, body as Record<string, unknown>);
+    })
+    /** Get pet by id. */
+    .get('/:id', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.get(authUser.id, String(params.id));
+    })
+    /** Update pet by id. */
+    .put('/:id', async (ctx: any) => {
+      const { headers, jwt, params, body } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.update(authUser.id, String(params.id), body as Record<string, unknown>);
+    })
+    /** Delete pet by id. */
+    .delete('/:id', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.remove(authUser.id, String(params.id));
+    })
+    /** Add a medical record under pet id. */
+    .post('/:id/medical-records', async (ctx: any) => {
+      const { headers, jwt, params, body } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.addMedicalRecord(authUser.id, String(params.id), body as Record<string, unknown>);
+    })
+    /** List medical records for pet id. */
+    .get('/:id/medical-records', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.listMedicalRecords(authUser.id, String(params.id));
+    })
+    /** Get preferences for pet id. */
+    .get('/:id/preferences', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.getPreferences(authUser.id, String(params.id));
+    })
+    /** Update preferences for pet id. */
+    .put('/:id/preferences', async (ctx: any) => {
+      const { headers, jwt, params, body } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return PetsService.updatePreferences(authUser.id, String(params.id), body as Record<string, unknown>);
+    }),
 );
