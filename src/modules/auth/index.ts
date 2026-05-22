@@ -13,6 +13,13 @@ export const authController = new Elysia({ name: 'auth-controller' }).group('/au
       return user;
     })
     /**
+     * Alias endpoint for mobile/web register screens.
+     */
+    .post('/register', async ({ body }) => {
+      const user = await AuthService.signup(body as Record<string, unknown>);
+      return user;
+    })
+    /**
      * Login and issue JWT access token.
      */
     .post('/login', async (ctx: any) => {

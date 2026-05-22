@@ -1,4 +1,4 @@
-export type Role = 'super_admin' | 'admin' | 'support' | 'user';
+export type Role = 'super_admin' | 'admin' | 'support' | 'customer';
 
 export type Permission =
   | 'users.read'
@@ -23,7 +23,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   ],
   admin: ['users.read', 'pets.read', 'pets.write', 'orders.read', 'orders.write', 'sync.manage'],
   support: ['users.read', 'pets.read', 'orders.read'],
-  user: ['pets.read', 'pets.write'],
+  customer: ['pets.read', 'pets.write'],
 };
 
 /**

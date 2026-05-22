@@ -129,7 +129,7 @@ VALUES
   ('super_admin', 'Super Admin', 'Full system access', TRUE),
   ('admin', 'Admin', 'Administrative access', TRUE),
   ('support', 'Support', 'Support team access', TRUE),
-  ('user', 'User', 'Standard user access', TRUE)
+  ('customer', 'Customer', 'Customer app access', TRUE)
 ON CONFLICT (code) DO NOTHING;
 
 -- Seed baseline permissions

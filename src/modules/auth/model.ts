@@ -2,19 +2,23 @@ import type { Role } from '@/shared/auth/rbac';
 
 type UserRecord = {
   id: string;
+  firstName: string;
+  lastName: string;
   email: string;
+  phone?: string;
   password: string;
   role: Role;
-  name?: string;
 };
 
 const users: UserRecord[] = [
   {
     id: 'u_super_1',
+    firstName: 'Super',
+    lastName: 'Admin',
     email: 'super@careleo.com',
     password: 'admin123',
     role: 'super_admin',
-    name: 'Super Admin',
+    phone: '+8801000000000',
   },
 ];
 
@@ -29,16 +33,25 @@ export const AuthModel = {
   /**
    * Create a new user record in the in-memory store.
    */
-  async createUser(payload: { email: string; password: string; role?: Role; name?: string }) {
+  async createUser(payload: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone?: string;
+    password: string;
+    role?: Role;
+  }) {
     const existing = await this.findByEmail(payload.email);
     if (existing) return null;
 
     const user: UserRecord = {
       id: `u_${Date.now()}`,
+      firstName: payload.firstName,
+      lastName: payload.lastName,
       email: payload.email,
+      phone: payload.phone,
       password: payload.password,
-      role: payload.role ?? 'user',
-      name: payload.name,
+      role: payload.role ?? 'customer',
     };
 
     users.push(user);
