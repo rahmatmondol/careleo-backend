@@ -17,6 +17,7 @@
     "@elysiajs/swagger": "latest",
     "drizzle-orm": "^0.45.2",
     "elysia": "latest",
+    "firebase-admin": "^13.10.0",
     "pg": "^8.21.0",
     "zod": "latest"
   },

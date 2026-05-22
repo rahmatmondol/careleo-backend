@@ -18,12 +18,14 @@ export const users = pgTable(
   'users',
   {
     id: uuid('id').defaultRandom().primaryKey(),
+    firebaseUid: varchar('firebase_uid', { length: 191 }),
     firstName: varchar('first_name', { length: 120 }).notNull(),
     lastName: varchar('last_name', { length: 120 }).notNull(),
     email: varchar('email', { length: 255 }).notNull(),
     phone: varchar('phone', { length: 30 }),
     passwordHash: text('password_hash').notNull(),
     avatarUrl: text('avatar_url'),
+    provider: varchar('provider', { length: 20 }).notNull().default('password'),
     status: varchar('status', { length: 20 }).notNull().default('active'),
     isEmailVerified: boolean('is_email_verified').notNull().default(false),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
@@ -31,6 +33,7 @@ export const users = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    uniqueIndex('users_firebase_uid_unique').on(table.firebaseUid),
     uniqueIndex('users_email_unique').on(table.email),
     index('idx_users_email').on(table.email),
     index('idx_users_status').on(table.status),
@@ -116,5 +119,28 @@ export const sessions = pgTable(
     index('idx_sessions_user_id').on(table.userId),
     index('idx_sessions_expires_at').on(table.expiresAt),
     index('idx_sessions_revoked_at').on(table.revokedAt),
+  ],
+);
+
+/**
+ * Device tokens table for Firebase Cloud Messaging delivery.
+ */
+export const deviceTokens = pgTable(
+  'device_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    fcmToken: text('fcm_token').notNull(),
+    platform: varchar('platform', { length: 20 }).notNull(),
+    appVersion: varchar('app_version', { length: 40 }),
+    isActive: boolean('is_active').notNull().default(true),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('device_tokens_fcm_token_unique').on(table.fcmToken),
+    index('idx_device_tokens_user_id').on(table.userId),
+    index('idx_device_tokens_is_active').on(table.isActive),
   ],
 );

@@ -33,6 +33,19 @@ export const authController = new Elysia({ name: 'auth-controller' }).group('/au
       };
     })
     /**
+     * Login/register user using Firebase ID token (Google or Email provider).
+     */
+    .post('/firebase', async (ctx: any) => {
+      const { body, jwt } = ctx;
+      const user = await AuthService.firebaseLogin(body as Record<string, unknown>);
+      const accessToken = await jwt.sign({ id: user.id, email: user.email, role: user.role });
+
+      return {
+        accessToken,
+        user,
+      };
+    })
+    /**
      * Get current authenticated user profile.
      */
     .get('/me', async (ctx: any) => {

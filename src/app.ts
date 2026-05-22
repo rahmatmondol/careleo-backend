@@ -17,6 +17,7 @@ import { storebridgeController } from './modules/store-bridge/index';
 import { adminController } from './modules/admin/index';
 import { auditController } from './modules/audit/index';
 import { syncController } from './modules/sync/index';
+import { notificationsController } from './modules/notifications/index';
 import { wooCommerceController } from './modules/integrations/woocommerce/index';
 
 const prefix = process.env.API_PREFIX || '/api/v1';
@@ -60,5 +61,6 @@ export const app = new Elysia()
       .use(adminController)
       .use(auditController)
       .use(syncController)
+      .use(notificationsController)
       .use(wooCommerceController)
   );

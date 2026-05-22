@@ -1,76 +1,201 @@
+import { and, eq } from 'drizzle-orm';
+import { db } from '@/shared/db';
+import { roles, userRoles, users } from '@/shared/db/schema';
 import type { Role } from '@/shared/auth/rbac';
 
-type UserRecord = {
+type DbUser = {
   id: string;
   firstName: string;
   lastName: string;
   email: string;
-  phone?: string;
-  password: string;
+  phone: string | null;
   role: Role;
+  provider: 'google' | 'password';
+  passwordHash: string;
 };
 
-const users: UserRecord[] = [
-  {
-    id: 'u_super_1',
-    firstName: 'Super',
-    lastName: 'Admin',
-    email: 'super@careleo.com',
-    password: 'admin123',
-    role: 'super_admin',
-    phone: '+8801000000000',
-  },
-];
+const mapRole = (code?: string | null): Role => {
+  if (code === 'super_admin' || code === 'admin' || code === 'support' || code === 'customer') return code;
+  return 'customer';
+};
+
+const mapProvider = (provider?: string | null): 'google' | 'password' => {
+  return provider === 'google' ? 'google' : 'password';
+};
 
 export const AuthModel = {
   /**
-   * Find an existing user by email from the in-memory store.
+   * Read user row + role by email.
    */
-  async findByEmail(email: string) {
-    return users.find((u) => u.email.toLowerCase() === email.toLowerCase()) ?? null;
+  async findByEmail(email: string): Promise<DbUser | null> {
+    const rows = await db
+      .select({
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        phone: users.phone,
+        provider: users.provider,
+        passwordHash: users.passwordHash,
+        roleCode: roles.code,
+      })
+      .from(users)
+      .leftJoin(userRoles, eq(userRoles.userId, users.id))
+      .leftJoin(roles, eq(roles.id, userRoles.roleId))
+      .where(eq(users.email, email))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      email: row.email,
+      phone: row.phone,
+      provider: mapProvider(row.provider),
+      passwordHash: row.passwordHash,
+      role: mapRole(row.roleCode),
+    };
   },
 
   /**
-   * Create a new user record in the in-memory store.
+   * Read user row + role by Firebase UID.
+   */
+  async findByFirebaseUid(firebaseUid: string): Promise<DbUser | null> {
+    const rows = await db
+      .select({
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        phone: users.phone,
+        provider: users.provider,
+        passwordHash: users.passwordHash,
+        roleCode: roles.code,
+      })
+      .from(users)
+      .leftJoin(userRoles, eq(userRoles.userId, users.id))
+      .leftJoin(roles, eq(roles.id, userRoles.roleId))
+      .where(eq(users.firebaseUid, firebaseUid))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      email: row.email,
+      phone: row.phone,
+      provider: mapProvider(row.provider),
+      passwordHash: row.passwordHash,
+      role: mapRole(row.roleCode),
+    };
+  },
+
+  /**
+   * Create a new user row and attach default/customer role.
    */
   async createUser(payload: {
     firstName: string;
     lastName: string;
     email: string;
     phone?: string;
-    password: string;
+    passwordHash: string;
     role?: Role;
-  }) {
-    const existing = await this.findByEmail(payload.email);
-    if (existing) return null;
+    provider?: 'google' | 'password';
+    firebaseUid?: string;
+  }): Promise<DbUser | null> {
+    const roleCode = payload.role ?? 'customer';
 
-    const user: UserRecord = {
-      id: `u_${Date.now()}`,
-      firstName: payload.firstName,
-      lastName: payload.lastName,
-      email: payload.email,
-      phone: payload.phone,
-      password: payload.password,
-      role: payload.role ?? 'customer',
+    const roleRow = await db.select().from(roles).where(eq(roles.code, roleCode)).limit(1);
+    if (!roleRow[0]) return null;
+
+    const inserted = await db
+      .insert(users)
+      .values({
+        firstName: payload.firstName,
+        lastName: payload.lastName,
+        email: payload.email,
+        phone: payload.phone,
+        passwordHash: payload.passwordHash,
+        provider: payload.provider ?? 'password',
+        firebaseUid: payload.firebaseUid,
+      })
+      .returning({
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        phone: users.phone,
+        provider: users.provider,
+        passwordHash: users.passwordHash,
+      });
+
+    if (!inserted[0]) return null;
+
+    await db.insert(userRoles).values({ userId: inserted[0].id, roleId: roleRow[0].id });
+
+    return {
+      ...inserted[0],
+      provider: mapProvider(inserted[0].provider),
+      role: roleCode,
     };
-
-    users.push(user);
-    return user;
   },
 
   /**
-   * Verify email + password combination.
+   * Lookup user by ID with role information.
    */
-  async verifyUser(email: string, password: string) {
-    const user = await this.findByEmail(email);
-    if (!user || user.password !== password) return null;
-    return user;
+  async getById(id: string): Promise<DbUser | null> {
+    const rows = await db
+      .select({
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        phone: users.phone,
+        provider: users.provider,
+        passwordHash: users.passwordHash,
+        roleCode: roles.code,
+      })
+      .from(users)
+      .leftJoin(userRoles, eq(userRoles.userId, users.id))
+      .leftJoin(roles, eq(roles.id, userRoles.roleId))
+      .where(eq(users.id, id))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      email: row.email,
+      phone: row.phone,
+      provider: mapProvider(row.provider),
+      passwordHash: row.passwordHash,
+      role: mapRole(row.roleCode),
+    };
   },
 
   /**
-   * Lookup user by ID.
+   * Update last login timestamp.
    */
-  async getById(id: string) {
-    return users.find((u) => u.id === id) ?? null;
+  async touchLastLogin(id: string) {
+    await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, id));
+  },
+
+  /**
+   * Bind Firebase UID/provider to an existing user.
+   */
+  async linkFirebaseIdentity(userId: string, firebaseUid: string, provider: 'google' | 'password') {
+    await db
+      .update(users)
+      .set({ firebaseUid, provider, lastLoginAt: new Date() })
+      .where(eq(users.id, userId));
   },
 };
