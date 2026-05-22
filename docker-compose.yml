@@ -1,0 +1,22 @@
+services:
+  careleo-postgres:
+    image: postgres:16-alpine
+    container_name: careleo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: careleo
+      POSTGRES_USER: careleo
+      POSTGRES_PASSWORD: careleo_dev_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - careleo_pg_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careleo -d careleo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  careleo_pg_data:
