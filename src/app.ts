@@ -24,6 +24,7 @@ const prefix = process.env.API_PREFIX || '/api/v1';
 export const app = new Elysia()
   .use(cors())
   .use(
+    // Register JWT plugin globally so modules can sign/verify access tokens.
     jwt({
       name: 'jwt',
       secret: process.env.JWT_ACCESS_SECRET || 'dev_jwt_secret_change_me',
@@ -31,6 +32,7 @@ export const app = new Elysia()
   )
   .use(swagger())
   .onAfterHandle(({ response }) => {
+    // Normalize all successful responses into a single envelope format.
     if (
       response &&
       typeof response === 'object' &&
@@ -41,6 +43,7 @@ export const app = new Elysia()
     return ok(response);
   })
   .onError(({ error, set }) => {
+    // Normalize all thrown errors into the centralized error envelope.
     return handleApiError(error, set);
   })
   .group(prefix, (api) =>

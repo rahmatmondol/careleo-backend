@@ -2,6 +2,9 @@ import type { Context } from 'elysia';
 import { AppError } from '../errors';
 import { fail } from './response';
 
+/**
+ * Convert thrown exceptions into the centralized API error envelope.
+ */
 export const handleApiError = (error: unknown, set?: Context['set']) => {
   if (error instanceof AppError) {
     if (set) set.status = error.status;

@@ -3,6 +3,9 @@ import { AuthModel } from './model';
 import { ROLE_PERMISSIONS, type Role } from '@/shared/auth/rbac';
 
 export const AuthService = {
+  /**
+   * Register a new account with role and default permission mapping.
+   */
   async signup(payload: Record<string, unknown>) {
     const email = String(payload.email ?? '').trim();
     const password = String(payload.password ?? '');
@@ -22,6 +25,9 @@ export const AuthService = {
     };
   },
 
+  /**
+   * Authenticate an existing account.
+   */
   async login(payload: Record<string, unknown>) {
     const email = String(payload.email ?? '').trim();
     const password = String(payload.password ?? '');
@@ -39,6 +45,9 @@ export const AuthService = {
     };
   },
 
+  /**
+   * Return the currently authenticated user's profile + permissions.
+   */
   async me(userId: string) {
     const user = await AuthModel.getById(userId);
     if (!user) throw new UnauthorizedError('User not found');

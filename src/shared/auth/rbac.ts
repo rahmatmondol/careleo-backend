@@ -26,5 +26,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   user: ['pets.read', 'pets.write'],
 };
 
+/**
+ * Check whether a role includes a required permission.
+ */
 export const hasPermission = (role: Role, permission: Permission) =>
   ROLE_PERMISSIONS[role]?.includes(permission) ?? false;

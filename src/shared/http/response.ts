@@ -18,6 +18,9 @@ export type ApiFailure = {
   meta?: ApiMeta;
 };
 
+/**
+ * Build a standard success response envelope for all API handlers.
+ */
 export const ok = <T>(data: T, meta?: ApiMeta): ApiSuccess<T> => ({
   success: true,
   data,
@@ -25,6 +28,9 @@ export const ok = <T>(data: T, meta?: ApiMeta): ApiSuccess<T> => ({
   ...(meta ? { meta } : {}),
 });
 
+/**
+ * Build a standard error response envelope for all API handlers.
+ */
 export const fail = (
   code: string,
   message: string,

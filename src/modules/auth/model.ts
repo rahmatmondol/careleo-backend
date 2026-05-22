@@ -19,10 +19,16 @@ const users: UserRecord[] = [
 ];
 
 export const AuthModel = {
+  /**
+   * Find an existing user by email from the in-memory store.
+   */
   async findByEmail(email: string) {
     return users.find((u) => u.email.toLowerCase() === email.toLowerCase()) ?? null;
   },
 
+  /**
+   * Create a new user record in the in-memory store.
+   */
   async createUser(payload: { email: string; password: string; role?: Role; name?: string }) {
     const existing = await this.findByEmail(payload.email);
     if (existing) return null;
@@ -39,12 +45,18 @@ export const AuthModel = {
     return user;
   },
 
+  /**
+   * Verify email + password combination.
+   */
   async verifyUser(email: string, password: string) {
     const user = await this.findByEmail(email);
     if (!user || user.password !== password) return null;
     return user;
   },
 
+  /**
+   * Lookup user by ID.
+   */
   async getById(id: string) {
     return users.find((u) => u.id === id) ?? null;
   },

@@ -5,11 +5,18 @@ import { ROLE_PERMISSIONS } from '@/shared/auth/rbac';
 
 export const authController = new Elysia({ name: 'auth-controller' }).group('/auth', (app) =>
   app
+    /**
+     * Register a new user account.
+     */
     .post('/signup', async ({ body }) => {
       const user = await AuthService.signup(body as Record<string, unknown>);
       return user;
     })
-    .post('/login', async ({ body, jwt }) => {
+    /**
+     * Login and issue JWT access token.
+     */
+    .post('/login', async (ctx: any) => {
+      const { body, jwt } = ctx;
       const user = await AuthService.login(body as Record<string, unknown>);
       const accessToken = await jwt.sign({ id: user.id, email: user.email, role: user.role });
 
@@ -18,17 +25,29 @@ export const authController = new Elysia({ name: 'auth-controller' }).group('/au
         user,
       };
     })
-    .get('/me', async ({ headers, jwt }) => {
+    /**
+     * Get current authenticated user profile.
+     */
+    .get('/me', async (ctx: any) => {
+      const { headers, jwt } = ctx;
       const authUser = await requireAuth(headers, jwt);
       return AuthService.me(authUser.id);
     })
-    .get('/roles', async ({ headers, jwt }) => {
+    /**
+     * List role -> permission mapping. Restricted to admin/super_admin.
+     */
+    .get('/roles', async (ctx: any) => {
+      const { headers, jwt } = ctx;
       const authUser = await requireAuth(headers, jwt);
       requireRole(authUser, ['super_admin', 'admin']);
 
       return Object.entries(ROLE_PERMISSIONS).map(([role, permissions]) => ({ role, permissions }));
     })
-    .post('/permissions/check', async ({ headers, body, jwt }) => {
+    /**
+     * Check whether current user has a specific permission.
+     */
+    .post('/permissions/check', async (ctx: any) => {
+      const { headers, body, jwt } = ctx;
       const authUser = await requireAuth(headers, jwt);
       const permission = String((body as Record<string, unknown>).permission ?? '');
       requirePermission(authUser, permission as any);
