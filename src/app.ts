@@ -43,9 +43,13 @@ export const app = new Elysia()
     }
     return ok(response);
   })
-  .onError(({ error, set }) => {
+  .onError(({ error, set, code, path, request }) => {
     // Normalize all thrown errors into the centralized error envelope.
-    return handleApiError(error, set);
+    return handleApiError(error, set, {
+      code: String(code),
+      path,
+      method: request.method,
+    });
   })
   .group(prefix, (api) =>
     api
