@@ -32,6 +32,22 @@ export const authController = new Elysia({ name: 'auth-controller' }).group('/au
       };
     })
     /**
+     * Request forgot-password reset token.
+     */
+    .post('/forgot-password', async ({ body }) => AuthService.forgotPassword(body as Record<string, unknown>))
+    /**
+     * Verify email using one-time token.
+     */
+    .post('/verify-email', async ({ body }) => AuthService.verifyEmail(body as Record<string, unknown>))
+    /**
+     * Create password with invite/setup token.
+     */
+    .post('/create-password', async ({ body }) => AuthService.createPassword(body as Record<string, unknown>))
+    /**
+     * Reset password with forgot-password token.
+     */
+    .post('/reset-password', async ({ body }) => AuthService.resetPassword(body as Record<string, unknown>))
+    /**
      * Login/register user using Firebase ID token (Google or Email provider).
      */
     .post('/firebase', async (ctx: any) => {

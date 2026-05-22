@@ -1,6 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, gt, isNull } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { roles, userRoles, users } from '@/shared/db/schema';
+import { authTokens, roles, userRoles, users } from '@/shared/db/schema';
 import type { Role } from '@/shared/auth/rbac';
 
 type DbUser = {
@@ -9,6 +9,12 @@ type DbUser = {
   lastName: string;
   email: string;
   phone: string | null;
+  avatarUrl: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  postalCode: string | null;
   role: Role;
   provider: 'google' | 'password';
   passwordHash: string;
@@ -23,10 +29,25 @@ const mapProvider = (provider?: string | null): 'google' | 'password' => {
   return provider === 'google' ? 'google' : 'password';
 };
 
+const mapDbUser = (row: any): DbUser => ({
+  id: row.id,
+  firstName: row.firstName,
+  lastName: row.lastName,
+  email: row.email,
+  phone: row.phone,
+  avatarUrl: row.avatarUrl ?? null,
+  address: row.address ?? null,
+  city: row.city ?? null,
+  state: row.state ?? null,
+  country: row.country ?? null,
+  postalCode: row.postalCode ?? null,
+  provider: mapProvider(row.provider),
+  passwordHash: row.passwordHash,
+  role: mapRole(row.roleCode),
+});
+
 export const AuthModel = {
-  /**
-   * Read user row + role by email.
-   */
+  /** Read user row + role by email. */
   async findByEmail(email: string): Promise<DbUser | null> {
     const rows = await db
       .select({
@@ -35,6 +56,12 @@ export const AuthModel = {
         lastName: users.lastName,
         email: users.email,
         phone: users.phone,
+        avatarUrl: users.avatarUrl,
+        address: users.address,
+        city: users.city,
+        state: users.state,
+        country: users.country,
+        postalCode: users.postalCode,
         provider: users.provider,
         passwordHash: users.passwordHash,
         roleCode: roles.code,
@@ -46,23 +73,10 @@ export const AuthModel = {
       .limit(1);
 
     if (!rows[0]) return null;
-    const row = rows[0];
-
-    return {
-      id: row.id,
-      firstName: row.firstName,
-      lastName: row.lastName,
-      email: row.email,
-      phone: row.phone,
-      provider: mapProvider(row.provider),
-      passwordHash: row.passwordHash,
-      role: mapRole(row.roleCode),
-    };
+    return mapDbUser(rows[0]);
   },
 
-  /**
-   * Read user row + role by Firebase UID.
-   */
+  /** Read user row + role by Firebase UID. */
   async findByFirebaseUid(firebaseUid: string): Promise<DbUser | null> {
     const rows = await db
       .select({
@@ -71,6 +85,12 @@ export const AuthModel = {
         lastName: users.lastName,
         email: users.email,
         phone: users.phone,
+        avatarUrl: users.avatarUrl,
+        address: users.address,
+        city: users.city,
+        state: users.state,
+        country: users.country,
+        postalCode: users.postalCode,
         provider: users.provider,
         passwordHash: users.passwordHash,
         roleCode: roles.code,
@@ -82,23 +102,10 @@ export const AuthModel = {
       .limit(1);
 
     if (!rows[0]) return null;
-    const row = rows[0];
-
-    return {
-      id: row.id,
-      firstName: row.firstName,
-      lastName: row.lastName,
-      email: row.email,
-      phone: row.phone,
-      provider: mapProvider(row.provider),
-      passwordHash: row.passwordHash,
-      role: mapRole(row.roleCode),
-    };
+    return mapDbUser(rows[0]);
   },
 
-  /**
-   * Create a new user row and attach default/customer role.
-   */
+  /** Create a new user row and attach default/customer role. */
   async createUser(payload: {
     firstName: string;
     lastName: string;
@@ -110,7 +117,6 @@ export const AuthModel = {
     firebaseUid?: string;
   }): Promise<DbUser | null> {
     const roleCode = payload.role ?? 'customer';
-
     const roleRow = await db.select().from(roles).where(eq(roles.code, roleCode)).limit(1);
     if (!roleRow[0]) return null;
 
@@ -125,30 +131,14 @@ export const AuthModel = {
         provider: payload.provider ?? 'password',
         firebaseUid: payload.firebaseUid,
       })
-      .returning({
-        id: users.id,
-        firstName: users.firstName,
-        lastName: users.lastName,
-        email: users.email,
-        phone: users.phone,
-        provider: users.provider,
-        passwordHash: users.passwordHash,
-      });
+      .returning({ id: users.id });
 
     if (!inserted[0]) return null;
-
     await db.insert(userRoles).values({ userId: inserted[0].id, roleId: roleRow[0].id });
-
-    return {
-      ...inserted[0],
-      provider: mapProvider(inserted[0].provider),
-      role: roleCode,
-    };
+    return this.getById(inserted[0].id);
   },
 
-  /**
-   * Lookup user by ID with role information.
-   */
+  /** Lookup user by ID with role information. */
   async getById(id: string): Promise<DbUser | null> {
     const rows = await db
       .select({
@@ -157,6 +147,12 @@ export const AuthModel = {
         lastName: users.lastName,
         email: users.email,
         phone: users.phone,
+        avatarUrl: users.avatarUrl,
+        address: users.address,
+        city: users.city,
+        state: users.state,
+        country: users.country,
+        postalCode: users.postalCode,
         provider: users.provider,
         passwordHash: users.passwordHash,
         roleCode: roles.code,
@@ -168,34 +164,42 @@ export const AuthModel = {
       .limit(1);
 
     if (!rows[0]) return null;
-    const row = rows[0];
-
-    return {
-      id: row.id,
-      firstName: row.firstName,
-      lastName: row.lastName,
-      email: row.email,
-      phone: row.phone,
-      provider: mapProvider(row.provider),
-      passwordHash: row.passwordHash,
-      role: mapRole(row.roleCode),
-    };
+    return mapDbUser(rows[0]);
   },
 
-  /**
-   * Update last login timestamp.
-   */
+  /** Update password hash. */
+  async updatePassword(userId: string, passwordHash: string) {
+    await db.update(users).set({ passwordHash, updatedAt: new Date() }).where(eq(users.id, userId));
+  },
+
+  /** Update last login timestamp. */
   async touchLastLogin(id: string) {
     await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, id));
   },
 
-  /**
-   * Bind Firebase UID/provider to an existing user.
-   */
+  /** Bind Firebase UID/provider to existing user. */
   async linkFirebaseIdentity(userId: string, firebaseUid: string, provider: 'google' | 'password') {
-    await db
-      .update(users)
-      .set({ firebaseUid, provider, lastLoginAt: new Date() })
-      .where(eq(users.id, userId));
+    await db.update(users).set({ firebaseUid, provider, lastLoginAt: new Date() }).where(eq(users.id, userId));
+  },
+
+  /** Create a one-time token for auth actions. */
+  async createAuthToken(payload: { userId: string; token: string; type: 'email_verify' | 'password_reset' | 'create_password'; expiresAt: Date }) {
+    await db.insert(authTokens).values(payload);
+  },
+
+  /** Resolve active token for the requested auth action. */
+  async findActiveAuthToken(token: string, type: 'email_verify' | 'password_reset' | 'create_password') {
+    const rows = await db
+      .select()
+      .from(authTokens)
+      .where(and(eq(authTokens.token, token), eq(authTokens.type, type), isNull(authTokens.usedAt), gt(authTokens.expiresAt, new Date())))
+      .limit(1);
+
+    return rows[0] ?? null;
+  },
+
+  /** Mark token as consumed. */
+  async consumeAuthToken(id: string) {
+    await db.update(authTokens).set({ usedAt: new Date() }).where(eq(authTokens.id, id));
   },
 };

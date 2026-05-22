@@ -23,6 +23,11 @@ export const users = pgTable(
     lastName: varchar('last_name', { length: 120 }).notNull(),
     email: varchar('email', { length: 255 }).notNull(),
     phone: varchar('phone', { length: 30 }),
+    address: text('address'),
+    city: varchar('city', { length: 120 }),
+    state: varchar('state', { length: 120 }),
+    country: varchar('country', { length: 120 }),
+    postalCode: varchar('postal_code', { length: 40 }),
     passwordHash: text('password_hash').notNull(),
     avatarUrl: text('avatar_url'),
     provider: varchar('provider', { length: 20 }).notNull().default('password'),
@@ -119,6 +124,28 @@ export const sessions = pgTable(
     index('idx_sessions_user_id').on(table.userId),
     index('idx_sessions_expires_at').on(table.expiresAt),
     index('idx_sessions_revoked_at').on(table.revokedAt),
+  ],
+);
+
+/**
+ * One-time tokens for email verification, forgot-password reset, and create-password setup.
+ */
+export const authTokens = pgTable(
+  'auth_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    token: varchar('token', { length: 191 }).notNull(),
+    type: varchar('type', { length: 40 }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('auth_tokens_token_unique').on(table.token),
+    index('idx_auth_tokens_user_id').on(table.userId),
+    index('idx_auth_tokens_type').on(table.type),
+    index('idx_auth_tokens_expires_at').on(table.expiresAt),
   ],
 );
 
