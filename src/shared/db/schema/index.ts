@@ -1,4 +1,4 @@
-export * from './drizzle-auth';
+export * from './auth';
 export * from './users.schema';
 export * from './pets.schema';
 export * from './tasks.schema';

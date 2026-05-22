@@ -1,6 +1,6 @@
 /**
  * Backward-compatible exports for auth/RBAC schema.
- * Single source of truth: drizzle-auth.ts
+ * Single source of truth: auth.ts
  */
 export {
   users as usersSchema,
@@ -9,4 +9,4 @@ export {
   permissions as permissionsSchema,
   userRoles as userRolesSchema,
   rolePermissions as rolePermissionsSchema,
-} from './drizzle-auth';
+} from './auth';
