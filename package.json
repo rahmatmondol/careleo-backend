@@ -6,17 +6,24 @@
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "elysia": "latest",
     "@elysiajs/cors": "latest",
     "@elysiajs/jwt": "latest",
     "@elysiajs/swagger": "latest",
+    "drizzle-orm": "^0.45.2",
+    "elysia": "latest",
+    "pg": "^8.21.0",
     "zod": "latest"
   },
   "devDependencies": {
-    "typescript": "latest",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/pg": "^8.20.0",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "latest"
   }
 }
