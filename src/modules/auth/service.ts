@@ -59,7 +59,6 @@ export const AuthService = {
       phone: created.phone ?? null,
       role: created.role,
       provider: created.provider,
-      permissions: ROLE_PERMISSIONS[created.role],
     };
   },
 

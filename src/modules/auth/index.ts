@@ -8,16 +8,15 @@ export const authController = new Elysia({ name: 'auth-controller' }).group('/au
     /**
      * Register a new user account.
      */
-    .post('/signup', async ({ body }) => {
+    .post('/register', async (ctx: any) => {
+      const { body, jwt } = ctx;
       const user = await AuthService.signup(body as Record<string, unknown>);
-      return user;
-    })
-    /**
-     * Alias endpoint for mobile/web register screens.
-     */
-    .post('/register', async ({ body }) => {
-      const user = await AuthService.signup(body as Record<string, unknown>);
-      return user;
+      const accessToken = await jwt.sign({ id: user.id, email: user.email, role: 'customer' });
+
+      return {
+        accessToken,
+        user,
+      };
     })
     /**
      * Login and issue JWT access token.
