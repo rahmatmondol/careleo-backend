@@ -14,7 +14,9 @@ export const petsController = new Elysia({ name: 'pets-controller' }).group('/pe
     .post('', async (ctx: any) => {
       const { headers, jwt, body } = ctx;
       const authUser = await requireAuth(headers, jwt);
-      return PetsService.create(authUser.id, body as Record<string, unknown>);
+      const input = (body ?? {}) as Record<string, unknown>;
+      const file = ((input as any)?.image || (input as any)?.file) as File | undefined;
+      return PetsService.create(authUser.id, input, file);
     })
     /** Get pet by id. */
     .get('/:id', async (ctx: any) => {

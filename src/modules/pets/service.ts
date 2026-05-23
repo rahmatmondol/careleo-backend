@@ -20,8 +20,26 @@ const normalizeText = (value: unknown): string | undefined => {
 const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
 
 export const PetsService = {
+  /** Save a pet image file and return public URL. */
+  async savePetImageFile(petId: string, file: File) {
+    const extFromType = file.type?.includes('/') ? file.type.split('/')[1] : 'jpg';
+    const safeExt = sanitizeFileName(extFromType || 'jpg');
+    const safeName = sanitizeFileName(file.name || `pet.${safeExt}`);
+
+    const dir = path.join(UPLOAD_ROOT, 'pets', petId);
+    await mkdir(dir, { recursive: true });
+
+    const filename = `${Date.now()}-${safeName}`;
+    const absolutePath = path.join(dir, filename);
+
+    const bytes = Buffer.from(await file.arrayBuffer());
+    await writeFile(absolutePath, bytes);
+
+    return `/api/v1/uploads/pets/${petId}/${filename}`;
+  },
+
   /** Create a pet. */
-  async create(userId: string, payload: Record<string, unknown>) {
+  async create(userId: string, payload: Record<string, unknown>, file?: File) {
     const name = normalizeText(payload.name);
     const type = normalizeText(payload.type);
     if (!name || !type) throw new ValidationError('name and type are required');
@@ -44,6 +62,13 @@ export const PetsService = {
     });
 
     if (!created) throw new ValidationError('Failed to create pet');
+
+    if (file) {
+      const photoUrl = await this.savePetImageFile(created.id, file);
+      const updated = await PetsModel.updateById(userId, created.id, { photoUrl });
+      return { message: 'Pet created successfully', pet: updated ?? created };
+    }
+
     return { message: 'Pet created successfully', pet: created };
   },
 
@@ -92,20 +117,7 @@ export const PetsService = {
     if (!pet) throw new ValidationError('Pet not found');
     if (!file) throw new ValidationError('file is required');
 
-    const extFromType = file.type?.includes('/') ? file.type.split('/')[1] : 'jpg';
-    const safeExt = sanitizeFileName(extFromType || 'jpg');
-    const safeName = sanitizeFileName(file.name || `pet.${safeExt}`);
-
-    const dir = path.join(UPLOAD_ROOT, 'pets', petId);
-    await mkdir(dir, { recursive: true });
-
-    const filename = `${Date.now()}-${safeName}`;
-    const absolutePath = path.join(dir, filename);
-
-    const bytes = Buffer.from(await file.arrayBuffer());
-    await writeFile(absolutePath, bytes);
-
-    const photoUrl = `/api/v1/uploads/pets/${petId}/${filename}`;
+    const photoUrl = await this.savePetImageFile(petId, file);
     const updated = await PetsModel.updateById(userId, petId, { photoUrl });
 
     return {
