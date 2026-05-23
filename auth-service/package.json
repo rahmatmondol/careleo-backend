@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@elysiajs/cors": "latest",
-    "@elysiajs/jwt": "latest",
     "elysia": "latest"
   },
   "devDependencies": {
