@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ValidationError } from '@/shared/errors';
 import { PetsModel } from './model';
@@ -18,6 +18,21 @@ const normalizeText = (value: unknown): string | undefined => {
 };
 
 const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
+const UPLOAD_API_PREFIX = '/api/v1/uploads/';
+
+const deleteLocalUploadByUrl = async (fileUrl?: string | null) => {
+  if (!fileUrl || !fileUrl.startsWith(UPLOAD_API_PREFIX)) return;
+
+  const relativePath = fileUrl.slice(UPLOAD_API_PREFIX.length).replace(/^\/+/, '');
+  const absolutePath = path.resolve(path.join(UPLOAD_ROOT, relativePath));
+  if (!absolutePath.startsWith(path.resolve(UPLOAD_ROOT))) return;
+
+  try {
+    await unlink(absolutePath);
+  } catch {
+    // Ignore missing/locked files to keep API resilient.
+  }
+};
 
 export const PetsService = {
   /** Save a pet image file and return public URL. */
@@ -86,12 +101,21 @@ export const PetsService = {
   },
 
   /** Update pet. */
-  async update(userId: string, petId: string, payload: Record<string, unknown>) {
+  async update(userId: string, petId: string, payload: Record<string, unknown>, file?: File) {
+    const current = await PetsModel.getById(userId, petId);
+    if (!current) throw new ValidationError('Pet not found');
+
     const nextName = payload.name !== undefined ? normalizeText(payload.name) : undefined;
 
     if (nextName) {
       const duplicate = await PetsModel.findByNameExcludingId(userId, nextName, petId);
       if (duplicate) throw new ValidationError('Pet with the same name already exists');
+    }
+
+    let nextPhotoUrl: string | undefined;
+    if (file) {
+      nextPhotoUrl = await this.savePetImageFile(petId, file);
+      await deleteLocalUploadByUrl(current.photoUrl);
     }
 
     const updated = await PetsModel.updateById(userId, petId, {
@@ -102,6 +126,7 @@ export const PetsService = {
       ...(payload.dob !== undefined ? { dob: normalizeText(payload.dob) } : {}),
       ...(payload.weight !== undefined ? { weight: normalizeNumber(payload.weight) } : {}),
       ...(payload.photoUrl !== undefined ? { photoUrl: normalizeText(payload.photoUrl) } : {}),
+      ...(nextPhotoUrl !== undefined ? { photoUrl: nextPhotoUrl } : {}),
       ...(payload.color !== undefined ? { color: normalizeText(payload.color) } : {}),
       ...(payload.microchipId !== undefined ? { microchipId: normalizeText(payload.microchipId) } : {}),
       ...(payload.description !== undefined ? { description: normalizeText(payload.description) } : {}),
@@ -118,6 +143,7 @@ export const PetsService = {
     if (!file) throw new ValidationError('file is required');
 
     const photoUrl = await this.savePetImageFile(petId, file);
+    await deleteLocalUploadByUrl(pet.photoUrl);
     const updated = await PetsModel.updateById(userId, petId, { photoUrl });
 
     return {
@@ -129,6 +155,20 @@ export const PetsService = {
 
   /** Delete pet. */
   async remove(userId: string, petId: string) {
+    const pet = await PetsModel.getById(userId, petId);
+    if (!pet) throw new ValidationError('Pet not found');
+
+    await deleteLocalUploadByUrl(pet.photoUrl);
+
+    const petUploadDir = path.resolve(path.join(UPLOAD_ROOT, 'pets', petId));
+    if (petUploadDir.startsWith(path.resolve(UPLOAD_ROOT))) {
+      try {
+        await rm(petUploadDir, { recursive: true, force: true });
+      } catch {
+        // no-op
+      }
+    }
+
     const deleted = await PetsModel.deleteById(userId, petId);
     if (!deleted) throw new ValidationError('Pet not found');
     return { message: 'Pet deleted successfully' };
