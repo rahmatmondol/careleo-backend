@@ -7,7 +7,7 @@ import { healthRoutes } from './shared/http/health.routes';
 import { ok } from './shared/http/response';
 import { handleApiError } from './shared/http/error-handler';
 import { authController } from './modules/auth/index';
-import { userController } from './modules/user/index';
+import { uploadsController, userController } from './modules/user/index';
 import { usersController } from './modules/users/index';
 import { petsController } from './modules/pets/index';
 import { tasksController } from './modules/tasks/index';
@@ -33,7 +33,10 @@ export const app = new Elysia()
   )
   .use(swagger())
   .onAfterHandle(({ response }) => {
-    // Normalize all successful responses into a single envelope format.
+    // Pass through raw Response objects (file/stream responses).
+    if (response instanceof Response) return response;
+
+    // Normalize all successful JSON responses into a single envelope format.
     if (
       response &&
       typeof response === 'object' &&
@@ -56,6 +59,7 @@ export const app = new Elysia()
       .use(healthRoutes)
       .use(authController)
       .use(userController)
+      .use(uploadsController)
       .use(usersController)
       .use(petsController)
       .use(tasksController)

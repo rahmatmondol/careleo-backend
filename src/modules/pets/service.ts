@@ -1,5 +1,9 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { ValidationError } from '@/shared/errors';
 import { PetsModel } from './model';
+
+const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
 
 const normalizeNumber = (value: unknown): number | undefined => {
   if (value === undefined || value === null || value === '') return undefined;
@@ -12,6 +16,8 @@ const normalizeText = (value: unknown): string | undefined => {
   const text = String(value).trim();
   return text.length ? text : undefined;
 };
+
+const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
 
 export const PetsService = {
   /** Create a pet. */
@@ -68,6 +74,35 @@ export const PetsService = {
 
     if (!updated) throw new ValidationError('Pet not found');
     return { message: 'Pet updated successfully', pet: updated };
+  },
+
+  /** Upload pet image and persist photoUrl. */
+  async uploadPetImage(userId: string, petId: string, file: File) {
+    const pet = await PetsModel.getById(userId, petId);
+    if (!pet) throw new ValidationError('Pet not found');
+    if (!file) throw new ValidationError('file is required');
+
+    const extFromType = file.type?.includes('/') ? file.type.split('/')[1] : 'jpg';
+    const safeExt = sanitizeFileName(extFromType || 'jpg');
+    const safeName = sanitizeFileName(file.name || `pet.${safeExt}`);
+
+    const dir = path.join(UPLOAD_ROOT, 'pets', petId);
+    await mkdir(dir, { recursive: true });
+
+    const filename = `${Date.now()}-${safeName}`;
+    const absolutePath = path.join(dir, filename);
+
+    const bytes = Buffer.from(await file.arrayBuffer());
+    await writeFile(absolutePath, bytes);
+
+    const photoUrl = `/api/v1/uploads/pets/${petId}/${filename}`;
+    const updated = await PetsModel.updateById(userId, petId, { photoUrl });
+
+    return {
+      message: 'Pet image uploaded successfully',
+      photoUrl,
+      pet: updated,
+    };
   },
 
   /** Delete pet. */
