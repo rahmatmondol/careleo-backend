@@ -6,6 +6,7 @@ import { jwt } from '@elysiajs/jwt';
 import { healthRoutes } from './shared/http/health.routes';
 import { ok } from './shared/http/response';
 import { handleApiError } from './shared/http/error-handler';
+import { attachCorrelationId } from './shared/http/correlation-id';
 import { authController } from './modules/auth/index';
 import { uploadsController, userController } from './modules/user/index';
 import { usersController } from './modules/users/index';
@@ -26,6 +27,7 @@ import { walkersController } from './modules/walkers/index';
 const prefix = process.env.API_PREFIX || '/api/v1';
 
 export const app = new Elysia()
+  .use(attachCorrelationId)
   .use(cors())
   .use(
     // Register JWT plugin globally so modules can sign/verify access tokens.

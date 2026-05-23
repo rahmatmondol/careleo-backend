@@ -1,0 +1,188 @@
+version: "3.9"
+
+services:
+  api-gateway:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/api-gateway/src/index.ts
+    environment:
+      PORT: "4000"
+      API_PREFIX: /api/v1
+      AUTH_SERVICE_URL: http://auth-service:4013
+      USER_SERVICE_URL: http://user-service:4014
+      PET_SERVICE_URL: http://pet-service:4015
+      ADOPTION_SERVICE_URL: http://adoption-service:4010
+      VET_SERVICE_URL: http://vet-service:4011
+      CARE_SERVICE_URL: http://care-service:4012
+      SHOP_BRIDGE_SERVICE_URL: http://shop-bridge-service:4016
+      SOCIAL_SERVICE_URL: http://social-service:4017
+      NOTIFICATION_SERVICE_URL: http://notification-service:4018
+      ADMIN_SERVICE_URL: http://admin-service:4019
+    depends_on:
+      - auth-service
+      - user-service
+      - pet-service
+      - adoption-service
+      - vet-service
+      - care-service
+      - shop-bridge-service
+      - social-service
+      - notification-service
+      - admin-service
+    ports:
+      - "4000:4000"
+
+  adoption-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/adoption-service/src/index.ts
+    environment:
+      PORT: "4010"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4010:4010"
+
+  vet-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/vet-service/src/index.ts
+    environment:
+      PORT: "4011"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4011:4011"
+
+  care-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/care-service/src/index.ts
+    environment:
+      PORT: "4012"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4012:4012"
+
+  auth-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/auth-service/src/index.ts
+    environment:
+      PORT: "4013"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4013:4013"
+
+  user-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/user-service/src/index.ts
+    environment:
+      PORT: "4014"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4014:4014"
+
+  pet-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/pet-service/src/index.ts
+    environment:
+      PORT: "4015"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4015:4015"
+
+  shop-bridge-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/shop-bridge-service/src/index.ts
+    environment:
+      PORT: "4016"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      WOO_BASE_URL: ${WOO_BASE_URL}
+      WOO_CONSUMER_KEY: ${WOO_CONSUMER_KEY}
+      WOO_CONSUMER_SECRET: ${WOO_CONSUMER_SECRET}
+    ports:
+      - "4016:4016"
+
+  social-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/social-service/src/index.ts
+    environment:
+      PORT: "4017"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4017:4017"
+
+  notification-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/notification-service/src/index.ts
+    environment:
+      PORT: "4018"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4018:4018"
+
+  admin-service:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: bun services/admin-service/src/index.ts
+    environment:
+      PORT: "4019"
+      API_PREFIX: /api/v1
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+    ports:
+      - "4019:4019"
