@@ -32,7 +32,7 @@ export const petsController = new Elysia({ name: 'pets-controller' }).group('/pe
     .post('/:id/image', async (ctx: any) => {
       const { headers, jwt, params, body } = ctx;
       const authUser = await requireAuth(headers, jwt);
-      const file = (body as any)?.file as File;
+      const file = ((body as any)?.image || (body as any)?.file) as File;
       return PetsService.uploadPetImage(authUser.id, String(params.id), file);
     })
     /** Delete pet by id. */

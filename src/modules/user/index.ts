@@ -24,7 +24,7 @@ export const userController = new Elysia({ name: 'user-controller' }).group('/us
     .post('/me/image', async (ctx: any) => {
       const { headers, jwt, body } = ctx;
       const authUser = await requireAuth(headers, jwt);
-      const file = (body as any)?.file as File;
+      const file = ((body as any)?.image || (body as any)?.file) as File;
       return UserService.uploadProfileImage(authUser.id, file);
     })
 );
