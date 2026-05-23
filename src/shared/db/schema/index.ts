@@ -10,3 +10,4 @@ export * from './sync.schema';
 export * from './audit.schema';
 export * from './adoption.schema';
 export * from './vets.schema';
+export * from './walkers.schema';
