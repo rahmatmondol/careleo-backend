@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
 import { medicalRecords, petPreferences, pets } from '@/shared/db/schema';
 
@@ -50,6 +50,30 @@ export const PetsModel = {
   /** List all pets for the authenticated user. */
   async listByUser(userId: string) {
     return db.select().from(pets).where(eq(pets.userId, userId)).orderBy(desc(pets.createdAt));
+  },
+
+  /** Find user-owned pet by name (case-insensitive, trimmed input). */
+  async findByName(userId: string, name: string) {
+    const normalizedName = name.trim().toLowerCase();
+    const rows = await db
+      .select()
+      .from(pets)
+      .where(and(eq(pets.userId, userId), sql`LOWER(${pets.name}) = ${normalizedName}`))
+      .limit(1);
+
+    return rows[0] ?? null;
+  },
+
+  /** Find user-owned pet by name excluding a specific pet id. */
+  async findByNameExcludingId(userId: string, name: string, petId: string) {
+    const normalizedName = name.trim().toLowerCase();
+    const rows = await db
+      .select()
+      .from(pets)
+      .where(and(eq(pets.userId, userId), sql`LOWER(${pets.name}) = ${normalizedName}`, sql`${pets.id} <> ${petId}`))
+      .limit(1);
+
+    return rows[0] ?? null;
   },
 
   /** Fetch a single user-owned pet by id. */

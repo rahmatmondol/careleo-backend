@@ -26,6 +26,9 @@ export const PetsService = {
     const type = normalizeText(payload.type);
     if (!name || !type) throw new ValidationError('name and type are required');
 
+    const existing = await PetsModel.findByName(userId, name);
+    if (existing) throw new ValidationError('Pet with the same name already exists');
+
     const created = await PetsModel.createPet({
       userId,
       name,
@@ -59,8 +62,15 @@ export const PetsService = {
 
   /** Update pet. */
   async update(userId: string, petId: string, payload: Record<string, unknown>) {
+    const nextName = payload.name !== undefined ? normalizeText(payload.name) : undefined;
+
+    if (nextName) {
+      const duplicate = await PetsModel.findByNameExcludingId(userId, nextName, petId);
+      if (duplicate) throw new ValidationError('Pet with the same name already exists');
+    }
+
     const updated = await PetsModel.updateById(userId, petId, {
-      ...(payload.name !== undefined ? { name: normalizeText(payload.name) } : {}),
+      ...(payload.name !== undefined ? { name: nextName } : {}),
       ...(payload.type !== undefined ? { type: normalizeText(payload.type) } : {}),
       ...(payload.breed !== undefined ? { breed: normalizeText(payload.breed) } : {}),
       ...(payload.gender !== undefined ? { gender: normalizeText(payload.gender) } : {}),
