@@ -1,7 +1,7 @@
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { and, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { reminders, tasks } from '@/shared/db/schema';
+import { reminders, taskReminderLogs, tasks } from '@/shared/db/schema';
 import { NotificationsService } from '@/modules/notifications/service';
 
 const redisUrl = String(process.env.REDIS_URL ?? '').trim() || 'redis://localhost:6379';
@@ -35,12 +35,15 @@ const upsertJob = async (jobId: string, name: string, data: Record<string, unkno
   await notificationsQueue.add(name, data, { jobId, delay });
 };
 
+const REMINDER_MINUTES = [10, 20] as const;
+
 export const scheduleTaskDuePush = async (taskId: string) => {
   const row = await db
     .select({
       id: tasks.id,
       userId: tasks.userId,
       title: tasks.title,
+      taskType: tasks.taskType,
       dueDate: tasks.dueDate,
       isCompleted: tasks.isCompleted,
     })
@@ -65,16 +68,107 @@ export const scheduleTaskDuePush = async (taskId: string) => {
   await upsertJob(
     `task_due-${taskId}`,
     'task_due',
-    { taskId: String(task.id), userId: String(task.userId), title: String(task.title), dueDate: due.toISOString() },
+    {
+      taskId: String(task.id),
+      userId: String(task.userId),
+      title: String(task.title),
+      taskType: String(task.taskType),
+      dueDate: due.toISOString(),
+    },
     delayMs,
   );
+
+  await scheduleTaskReminderJobs(task.id, due);
 };
 
 export const unscheduleTaskDuePush = async (taskId: string) => {
   const job = await notificationsQueue.getJob(`task_due-${taskId}`);
-  if (!job) return;
+  if (job) {
+    try {
+      await job.remove();
+    } catch {}
+  }
+};
+
+const scheduleTaskReminderJobs = async (taskId: string, dueDate: Date) => {
+  for (const min of REMINDER_MINUTES) {
+    const jobId = `task_reminder_${min}-${taskId}`;
+    const fireAt = new Date(dueDate.getTime() + min * 60_000);
+    const delayMs = fireAt.getTime() - Date.now();
+    if (delayMs <= 0) continue;
+    await upsertJob(
+      jobId,
+      `task_reminder`,
+      {
+        taskId,
+        reminderMinutes: min,
+        dueDate: dueDate.toISOString(),
+        fireAt: fireAt.toISOString(),
+      },
+      delayMs,
+    );
+  }
+};
+
+export const unscheduleAllTaskReminderJobs = async (taskId: string) => {
+  for (const min of REMINDER_MINUTES) {
+    const job = await notificationsQueue.getJob(`task_reminder_${min}-${taskId}`);
+    if (job) {
+      try {
+        await job.remove();
+      } catch {}
+    }
+  }
+};
+
+const handleTaskReminderJob = async (taskId: string, reminderMinutes: number, dueDate: string) => {
+  if (!taskId) return;
+
+  const rows = await db
+    .select({
+      id: tasks.id,
+      userId: tasks.userId,
+      title: tasks.title,
+      taskType: tasks.taskType,
+      isCompleted: tasks.isCompleted,
+      dueDate: tasks.dueDate,
+    })
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .limit(1);
+
+  const t = rows[0];
+  if (!t) return;
+  if (t.isCompleted) return;
+  if (dueDate && new Date(t.dueDate as any).toISOString() !== dueDate) return;
+
+  const result = await NotificationsService.sendToUsers(
+    [String(t.userId)],
+    {
+      title: `Task reminder ${reminderMinutes}min`,
+      body: `"${String(t.title)}" is not completed yet`,
+      data: { taskId: String(t.id), event: `task_reminder_${reminderMinutes}`, reminderMinutes: String(reminderMinutes) },
+      type: `TASK_REMINDER`,
+    },
+    { targetMode: 'single' },
+  );
+
   try {
-    await job.remove();
+    await db.insert(taskReminderLogs).values({
+      taskId: String(t.id),
+      userId: String(t.userId),
+      reminderStep: reminderMinutes === 10 ? 1 : 2,
+      stepLabel: reminderMinutes === 10 ? 'FIRST_REMINDER' : 'SECOND_REMINDER',
+      taskTitle: String(t.title),
+      taskType: String(t.taskType),
+      taskDueDate: new Date(t.dueDate as any),
+      minutesSinceDue: reminderMinutes,
+      wasCompleted: false,
+      pushSent: result.sent > 0,
+      pushDelivered: result.sent > 0,
+      pushSuccessCount: result.sent,
+      pushFailureCount: result.failed,
+    });
   } catch {}
 };
 
@@ -280,6 +374,15 @@ export const startNotificationsWorker = () => {
           { title: 'Task due', body: `${String(t.title)} is due now`, data: { taskId: String(t.id), event: 'task_due' }, type: 'TASK_DUE' },
           { targetMode: 'single' },
         );
+        return;
+      }
+
+      if (job.name === 'task_reminder') {
+        const taskId = String((job.data as any)?.taskId ?? '');
+        const reminderMinutes = Number((job.data as any)?.reminderMinutes ?? 0);
+        const dueDate = String((job.data as any)?.dueDate ?? '');
+        if (!taskId || !reminderMinutes) return;
+        await handleTaskReminderJob(taskId, reminderMinutes, dueDate);
         return;
       }
 

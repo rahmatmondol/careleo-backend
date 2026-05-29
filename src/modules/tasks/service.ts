@@ -1,7 +1,7 @@
 import { ValidationError } from '@/shared/errors';
 import { TasksModel } from './model';
 import { NotificationsService } from '@/modules/notifications/service';
-import { scheduleTaskDuePush, unscheduleTaskDuePush } from '@/shared/queue';
+import { scheduleTaskDuePush, unscheduleAllTaskReminderJobs, unscheduleTaskDuePush } from '@/shared/queue';
 
 const normalizeText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -92,6 +92,7 @@ export const TasksService = {
     try {
       if (row.isCompleted) {
         await unscheduleTaskDuePush(id);
+        await unscheduleAllTaskReminderJobs(id);
       } else {
         await scheduleTaskDuePush(id);
       }
@@ -107,6 +108,7 @@ export const TasksService = {
 
     try {
       await unscheduleTaskDuePush(id);
+      await unscheduleAllTaskReminderJobs(id);
     } catch {}
 
     return { message: 'Task deleted successfully' };
