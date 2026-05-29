@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
-import { env } from '@/config/env';
 import { db } from '@/shared/db';
 import {
   integrationSyncJobs,
@@ -13,10 +12,24 @@ import {
 
 type JsonObj = Record<string, any>;
 
+const getWooConfig = () => {
+  const baseUrl = String(process.env.WOO_BASE_URL ?? '').trim();
+  const consumerKey = String(process.env.WOO_CONSUMER_KEY ?? '').trim();
+  const consumerSecret = String(process.env.WOO_CONSUMER_SECRET ?? '').trim();
+  const webhookSecret = String(process.env.WOO_WEBHOOK_SECRET ?? '').trim();
+
+  if (!baseUrl || !consumerKey || !consumerSecret) {
+    throw new Error('WooCommerce is not configured');
+  }
+
+  return { baseUrl, consumerKey, consumerSecret, webhookSecret };
+};
+
 const buildWooUrl = (path: string, query: Record<string, string | number | undefined> = {}) => {
-  const base = new URL(path, env.WOO_BASE_URL.endsWith('/') ? env.WOO_BASE_URL : `${env.WOO_BASE_URL}/`);
-  base.searchParams.set('consumer_key', env.WOO_CONSUMER_KEY);
-  base.searchParams.set('consumer_secret', env.WOO_CONSUMER_SECRET);
+  const cfg = getWooConfig();
+  const base = new URL(path, cfg.baseUrl.endsWith('/') ? cfg.baseUrl : `${cfg.baseUrl}/`);
+  base.searchParams.set('consumer_key', cfg.consumerKey);
+  base.searchParams.set('consumer_secret', cfg.consumerSecret);
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== null) base.searchParams.set(k, String(v));
   }
@@ -214,7 +227,9 @@ export const WooCommerceModel = {
   /** Verify webhook HMAC signature. */
   verifyWebhookSignature(rawBody: string, signature?: string) {
     if (!signature) return false;
-    const digest = crypto.createHmac('sha256', env.WOO_WEBHOOK_SECRET).update(rawBody).digest('base64');
+    const secret = String(process.env.WOO_WEBHOOK_SECRET ?? '').trim();
+    if (!secret) return false;
+    const digest = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
     return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
   },
 

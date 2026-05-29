@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { ValidationError, UnauthorizedError } from '@/shared/errors';
 import { AuthModel } from './model';
-import { ROLE_PERMISSIONS } from '@/shared/auth/rbac';
+import { ROLE_PERMISSIONS, type Role } from '@/shared/auth/rbac';
 import { verifyFirebaseIdToken } from '@/shared/integrations/firebase';
 import { NotificationsService } from '@/modules/notifications/service';
 
@@ -34,6 +34,7 @@ const generateToken = () => crypto.randomBytes(24).toString('hex');
 export const AuthService = {
   /** Register account with required app fields. */
   async signup(payload: Record<string, unknown>) {
+    await AuthModel.ensureReady();
     const firstName = String(payload.firstName ?? '').trim();
     const lastName = String(payload.lastName ?? '').trim();
     const email = String(payload.email ?? '').trim().toLowerCase();
@@ -63,11 +64,13 @@ export const AuthService = {
     const fcmToken = String(payload.fcmToken ?? '').trim();
     const platform = String(payload.platform ?? '').trim().toLowerCase();
     if (fcmToken && platform) {
-      await NotificationsService.registerDeviceToken(created.id, {
-        fcmToken,
-        platform,
-        appVersion: payload.appVersion,
-      });
+      try {
+        await NotificationsService.registerDeviceToken(created.id, {
+          fcmToken,
+          platform,
+          appVersion: payload.appVersion,
+        });
+      } catch {}
     }
 
     return buildProfile(created);
@@ -75,6 +78,7 @@ export const AuthService = {
 
   /** Email/password login flow. */
   async login(payload: Record<string, unknown>) {
+    await AuthModel.ensureReady();
     const email = String(payload.email ?? '').trim().toLowerCase();
     const password = String(payload.password ?? '');
     if (!email || !password) throw new ValidationError('email and password are required');
@@ -90,11 +94,13 @@ export const AuthService = {
     const fcmToken = String(payload.fcmToken ?? '').trim();
     const platform = String(payload.platform ?? '').trim().toLowerCase();
     if (fcmToken && platform) {
-      await NotificationsService.registerDeviceToken(user.id, {
-        fcmToken,
-        platform,
-        appVersion: payload.appVersion,
-      });
+      try {
+        await NotificationsService.registerDeviceToken(user.id, {
+          fcmToken,
+          platform,
+          appVersion: payload.appVersion,
+        });
+      } catch {}
     }
 
     return {
@@ -105,6 +111,7 @@ export const AuthService = {
 
   /** Firebase token login flow. */
   async firebaseLogin(payload: Record<string, unknown>) {
+    await AuthModel.ensureReady();
     const idToken = String(payload.idToken ?? '');
     if (!idToken) throw new ValidationError('idToken is required');
 
@@ -116,11 +123,20 @@ export const AuthService = {
     const provider: 'google' | 'password' = decoded.firebase?.sign_in_provider === 'google.com' ? 'google' : 'password';
 
     let isNewUser = false;
-    let user = await AuthModel.findByFirebaseUid(firebaseUid);
+    let user: any = null;
+    try {
+      user = await AuthModel.findByFirebaseUid(firebaseUid);
+    } catch {
+      user = null;
+    }
     if (!user) {
       const byEmail = await AuthModel.findByEmail(email);
       if (byEmail) {
-        await AuthModel.linkFirebaseIdentity(byEmail.id, firebaseUid, provider);
+        try {
+          await AuthModel.linkFirebaseIdentity(byEmail.id, firebaseUid, provider);
+        } catch {
+          // DB schema may not yet include firebase_uid/provider. Fallback to email-based auth.
+        }
         user = await AuthModel.getById(byEmail.id);
       } else {
         isNewUser = true;
@@ -131,12 +147,18 @@ export const AuthService = {
           email,
           phone: decoded.phone_number ?? undefined,
           passwordHash: await Bun.password.hash(`firebase:${firebaseUid}`),
-          provider,
-          firebaseUid,
+          // provider/firebaseUid are optional; if DB schema doesn't support these columns,
+          // we still create the user and rely on email for future firebase logins.
           role: 'customer',
         });
         if (!created) throw new ValidationError('Unable to create firebase user');
         user = created;
+
+        try {
+          await AuthModel.linkFirebaseIdentity(user.id, firebaseUid, provider);
+        } catch {
+          // ignore
+        }
       }
     }
 
@@ -146,16 +168,18 @@ export const AuthService = {
     const fcmToken = String(payload.fcmToken ?? '').trim();
     const platform = String(payload.platform ?? '').trim().toLowerCase();
     if (fcmToken && platform) {
-      await NotificationsService.registerDeviceToken(user.id, {
-        fcmToken,
-        platform,
-        appVersion: payload.appVersion,
-      });
+      try {
+        await NotificationsService.registerDeviceToken(user.id, {
+          fcmToken,
+          platform,
+          appVersion: payload.appVersion,
+        });
+      } catch {}
     }
 
     return {
       ...buildProfile(user),
-      permissions: ROLE_PERMISSIONS[user.role],
+      permissions: ROLE_PERMISSIONS[((user as any)?.role ?? 'customer') as Role],
       isNewUser,
     };
   },

@@ -1,6 +1,9 @@
 import { ValidationError } from '@/shared/errors';
-import { getFirebaseMessaging } from '@/shared/integrations/firebase-auth';
+import { sendPushToTokens } from '@/shared/integrations/firebase';
+import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { db } from '@/shared/db';
 import { NotificationsModel } from './model';
+import { reminders, tasks } from '@/shared/db/schema';
 
 type PushPayload = {
   title: string;
@@ -18,6 +21,100 @@ const chunk = <T>(items: T[], size = 500): T[][] => {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+};
+
+const getSchedulerState = () => {
+  const g = globalThis as any;
+  if (!g.__careleoScheduler) g.__careleoScheduler = { started: false, intervalId: null as any };
+  return g.__careleoScheduler as { started: boolean; intervalId: any };
+};
+
+const parseTimeToMinutes = (input: string): number | null => {
+  const raw = input.trim();
+  if (!raw) return null;
+
+  const match12h = raw.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (match12h) {
+    let h = Number(match12h[1]);
+    const m = Number(match12h[2]);
+    const meridian = match12h[3].toUpperCase();
+    if (Number.isNaN(h) || Number.isNaN(m) || m < 0 || m > 59 || h < 1 || h > 12) return null;
+    if (meridian === 'PM' && h !== 12) h += 12;
+    if (meridian === 'AM' && h === 12) h = 0;
+    return h * 60 + m;
+  }
+
+  const match24h = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (match24h) {
+    const h = Number(match24h[1]);
+    const m = Number(match24h[2]);
+    if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return h * 60 + m;
+  }
+
+  return null;
+};
+
+const parseDateOnly = (input: string): Date | null => {
+  const raw = input.trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const date = new Date(y, mo, d);
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getFullYear() !== y || date.getMonth() !== mo || date.getDate() !== d) return null;
+  return date;
+};
+
+const getFrequency = (value: unknown): string => String(value ?? '').trim().toLowerCase();
+
+const sameLocalDate = (a: Date, b: Date) => {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+};
+
+const shouldFireReminderNow = (payload: { frequency?: string | null; reminderDate?: string | null; reminderTime?: string | null }, now: Date): boolean => {
+  const time = parseTimeToMinutes(String(payload.reminderTime ?? '').trim());
+  if (time === null) return false;
+
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const diff = (nowMinutes - time + 1440) % 1440;
+  if (diff !== 0 && diff !== 1) return false;
+
+  const freq = getFrequency(payload.frequency);
+  const dateOnly = payload.reminderDate ? parseDateOnly(String(payload.reminderDate)) : null;
+  const nowForRule = diff === 1 ? new Date(now.getTime() - 60_000) : now;
+
+  if (freq.includes('once') || freq.includes('one')) {
+    if (!dateOnly) return true;
+    return sameLocalDate(nowForRule, dateOnly);
+  }
+
+  if (freq.includes('weekly')) {
+    if (!dateOnly) return true;
+    return nowForRule.getDay() === dateOnly.getDay();
+  }
+
+  if (freq.includes('monthly')) {
+    if (!dateOnly) return true;
+    return nowForRule.getDate() === dateOnly.getDate();
+  }
+
+  return true;
+};
+
+const notificationLoggedRecently = async (type: string, key: string, since: Date) => {
+  try {
+    const result = await db.execute(
+      sql`select id from notification_logs where type = ${type} and data_json like ${`%${key}%`} and created_at >= ${since} limit 1`,
+    );
+    const row = (result as any)?.rows?.[0];
+    return Boolean(row?.id);
+  } catch {
+    return false;
+  }
 };
 
 export const NotificationsService = {
@@ -54,23 +151,18 @@ export const NotificationsService = {
     const rows = await NotificationsModel.getActiveTokensByUserIds(userIds);
     const tokens = rows.map((r) => r.fcmToken);
     if (!tokens.length) return { sent: 0, failed: 0, users: userIds.length, message: 'No active device token found' };
-
-    const messaging = getFirebaseMessaging();
     let successCount = 0;
     let failureCount = 0;
     const invalidTokens: string[] = [];
 
     for (const part of chunk(tokens, 500)) {
-      const res = await messaging.sendEachForMulticast({
-        tokens: part,
-        notification: { title: payload.title, body: payload.body },
-        data: normalizeData(payload.data),
-      });
+      const res = await sendPushToTokens(part, { title: payload.title, body: payload.body, data: normalizeData(payload.data) });
       successCount += res.successCount;
       failureCount += res.failureCount;
-      res.responses.forEach((r, i) => {
-        if (!r.success) {
-          const code = (r.error as any)?.code;
+      const responses = ((res as any)?.responses ?? []) as Array<{ success: boolean; error?: unknown }>;
+      responses.forEach((r, i) => {
+        if (!r?.success) {
+          const code = (r as any)?.error?.code;
           if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
             invalidTokens.push(part[i]);
           }
@@ -80,18 +172,20 @@ export const NotificationsService = {
 
     if (invalidTokens.length) await NotificationsModel.deactivateTokens(invalidTokens);
 
-    await NotificationsModel.createLog({
-      type: payload.type ?? 'ADMIN_CUSTOM',
-      title: payload.title,
-      body: payload.body,
-      dataJson: JSON.stringify(payload.data ?? {}),
-      targetMode: meta.targetMode,
-      targetUserIds: JSON.stringify(userIds),
-      status: failureCount > 0 ? (successCount > 0 ? 'partial' : 'failed') : 'sent',
-      successCount,
-      failureCount,
-      createdBy: meta.createdBy,
-    });
+    try {
+      await NotificationsModel.createLog({
+        type: payload.type ?? 'ADMIN_CUSTOM',
+        title: payload.title,
+        body: payload.body,
+        dataJson: JSON.stringify(payload.data ?? {}),
+        targetMode: meta.targetMode,
+        targetUserIds: JSON.stringify(userIds),
+        status: failureCount > 0 ? (successCount > 0 ? 'partial' : 'failed') : 'sent',
+        successCount,
+        failureCount,
+        createdBy: meta.createdBy,
+      });
+    } catch {}
 
     return { sent: successCount, failed: failureCount, users: userIds.length };
   },
@@ -132,4 +226,77 @@ export const NotificationsService = {
   async logList(limit = 50) {
     return { logs: await NotificationsModel.listLogs(limit) };
   },
+};
+
+export const startTaskReminderPushScheduler = () => {
+  const state = getSchedulerState();
+  if (state.started) return;
+  state.started = true;
+
+  const tick = async () => {
+    const now = new Date();
+    const windowStart = new Date(now.getTime() - 5 * 60_000);
+    const windowEnd = new Date(now.getTime() + 2 * 60_000);
+
+    try {
+      const dueTasks = await db
+        .select({ id: tasks.id, userId: tasks.userId, title: tasks.title, dueDate: tasks.dueDate })
+        .from(tasks)
+        .where(and(eq(tasks.isCompleted, false), gte(tasks.dueDate, windowStart), lte(tasks.dueDate, windowEnd)));
+
+      for (const t of dueTasks) {
+        const key = `"taskId":"${t.id}"`;
+        const already = await notificationLoggedRecently('TASK_DUE', key, new Date(now.getTime() - 6 * 60 * 60 * 1000));
+        if (already) continue;
+        try {
+          await NotificationsService.sendToUsers(
+            [t.userId],
+            {
+              title: 'Task due',
+              body: `${t.title} is due now`,
+              data: { taskId: String(t.id), event: 'task_due' },
+              type: 'TASK_DUE',
+            },
+            { targetMode: 'single' },
+          );
+        } catch {}
+      }
+    } catch {}
+
+    try {
+      const activeReminders = await db
+        .select({
+          id: reminders.id,
+          userId: reminders.userId,
+          title: reminders.title,
+          frequency: reminders.frequency,
+          reminderDate: reminders.reminderDate,
+          reminderTime: reminders.reminderTime,
+        })
+        .from(reminders)
+        .where(and(eq(reminders.isActive, true), eq(reminders.isCompleted, false)));
+
+      for (const r of activeReminders) {
+        if (!shouldFireReminderNow(r, now)) continue;
+        const key = `"reminderId":"${r.id}"`;
+        const already = await notificationLoggedRecently('REMINDER_DUE', key, new Date(now.getTime() - 6 * 60 * 60 * 1000));
+        if (already) continue;
+        try {
+          await NotificationsService.sendToUsers(
+            [r.userId],
+            {
+              title: 'Reminder',
+              body: `${r.title}`,
+              data: { reminderId: String(r.id), event: 'reminder_due' },
+              type: 'REMINDER_DUE',
+            },
+            { targetMode: 'single' },
+          );
+        } catch {}
+      }
+    } catch {}
+  };
+
+  void tick();
+  state.intervalId = setInterval(() => void tick(), 60_000);
 };

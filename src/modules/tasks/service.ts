@@ -1,6 +1,7 @@
 import { ValidationError } from '@/shared/errors';
 import { TasksModel } from './model';
 import { NotificationsService } from '@/modules/notifications/service';
+import { scheduleTaskDuePush, unscheduleTaskDuePush } from '@/shared/queue';
 
 const normalizeText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -51,6 +52,10 @@ export const TasksService = {
       // Don't block task create if push delivery fails.
     }
 
+    try {
+      await scheduleTaskDuePush(row.id);
+    } catch {}
+
     return { message: 'Task created successfully', task: row };
   },
 
@@ -83,6 +88,15 @@ export const TasksService = {
 
     const row = await TasksModel.updateTask(userId, id, updatePayload);
     if (!row) throw new ValidationError('Task not found');
+
+    try {
+      if (row.isCompleted) {
+        await unscheduleTaskDuePush(id);
+      } else {
+        await scheduleTaskDuePush(id);
+      }
+    } catch {}
+
     return { message: 'Task updated successfully', task: row };
   },
 
@@ -90,6 +104,11 @@ export const TasksService = {
   async remove(userId: string, id: string) {
     const row = await TasksModel.deleteTask(userId, id);
     if (!row) throw new ValidationError('Task not found');
+
+    try {
+      await unscheduleTaskDuePush(id);
+    } catch {}
+
     return { message: 'Task deleted successfully' };
   },
 };

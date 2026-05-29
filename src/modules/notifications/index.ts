@@ -5,6 +5,20 @@ import { NotificationsService } from './service';
 export const notificationsController = new Elysia({ name: 'notifications-controller' })
   .group('/notifications', (app) =>
     app
+      .post('/test-push', async (ctx: any) => {
+        const { headers, jwt, body } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+
+        const title = String((body as any)?.title ?? 'Test notification').trim();
+        const message = String((body as any)?.body ?? 'Push notification is working').trim();
+        const data = (body as any)?.data && typeof (body as any).data === 'object' ? (body as any).data : undefined;
+
+        return NotificationsService.sendToUsers(
+          [authUser.id],
+          { title, body: message, data, type: 'TEST_PUSH' },
+          { targetMode: 'single' },
+        );
+      })
       .post('/device-token', async (ctx: any) => {
         const { headers, jwt, body } = ctx;
         const authUser = await requireAuth(headers, jwt);

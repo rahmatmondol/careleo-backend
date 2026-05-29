@@ -1,6 +1,7 @@
 import { ValidationError } from '@/shared/errors';
 import { RemindersModel } from './model';
 import { NotificationsService } from '@/modules/notifications/service';
+import { scheduleReminderDuePush, unscheduleReminderDuePush } from '@/shared/queue';
 
 const normalizeText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -46,6 +47,10 @@ export const RemindersService = {
       // Don't block reminder create if push delivery fails.
     }
 
+    try {
+      await scheduleReminderDuePush(row.id);
+    } catch {}
+
     return { message: 'Reminder created successfully', reminder: row };
   },
 
@@ -77,6 +82,15 @@ export const RemindersService = {
     });
 
     if (!row) throw new ValidationError('Reminder not found');
+
+    try {
+      if (!row.isActive || row.isCompleted) {
+        await unscheduleReminderDuePush(id);
+      } else {
+        await scheduleReminderDuePush(id);
+      }
+    } catch {}
+
     return { message: 'Reminder updated successfully', reminder: row };
   },
 
@@ -84,6 +98,11 @@ export const RemindersService = {
   async remove(userId: string, id: string) {
     const row = await RemindersModel.deleteReminder(userId, id);
     if (!row) throw new ValidationError('Reminder not found');
+
+    try {
+      await unscheduleReminderDuePush(id);
+    } catch {}
+
     return { message: 'Reminder deleted successfully' };
   },
 };
