@@ -92,6 +92,7 @@ export const AuthService = {
     const firebaseUid = decoded.uid;
     const provider: 'google' | 'password' = decoded.firebase?.sign_in_provider === 'google.com' ? 'google' : 'password';
 
+    let isNewUser = false;
     let user = await AuthModel.findByFirebaseUid(firebaseUid);
     if (!user) {
       const byEmail = await AuthModel.findByEmail(email);
@@ -99,6 +100,7 @@ export const AuthService = {
         await AuthModel.linkFirebaseIdentity(byEmail.id, firebaseUid, provider);
         user = await AuthModel.getById(byEmail.id);
       } else {
+        isNewUser = true;
         const fullName = splitName(decoded.name);
         const created = await AuthModel.createUser({
           firstName: fullName.firstName,
@@ -121,6 +123,7 @@ export const AuthService = {
     return {
       ...buildProfile(user),
       permissions: ROLE_PERMISSIONS[user.role],
+      isNewUser,
     };
   },
 

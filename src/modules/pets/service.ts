@@ -1,5 +1,7 @@
-import { mkdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import sharp from 'sharp';
 import { ValidationError } from '@/shared/errors';
 import { PetsModel } from './model';
 
@@ -19,6 +21,28 @@ const normalizeText = (value: unknown): string | undefined => {
 
 const sanitizeFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
 const UPLOAD_API_PREFIX = '/api/v1/uploads/';
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+const resolveLocalUploadPathFromUrl = (fileUrl?: string | null) => {
+  if (!fileUrl || !fileUrl.startsWith(UPLOAD_API_PREFIX)) return null;
+  const relativePath = fileUrl.slice(UPLOAD_API_PREFIX.length).replace(/^\/+/, '');
+  const absolutePath = path.resolve(path.join(UPLOAD_ROOT, relativePath));
+  if (!absolutePath.startsWith(path.resolve(UPLOAD_ROOT))) return null;
+  return absolutePath;
+};
+
+const compressPetImageToJpeg = async (bytes: Buffer) =>
+  sharp(bytes)
+    .rotate()
+    .resize(1024, 1024, {
+      fit: 'inside',
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: 80 })
+    .toBuffer();
 
 const deleteLocalUploadByUrl = async (fileUrl?: string | null) => {
   if (!fileUrl || !fileUrl.startsWith(UPLOAD_API_PREFIX)) return;
@@ -35,22 +59,37 @@ const deleteLocalUploadByUrl = async (fileUrl?: string | null) => {
 };
 
 export const PetsService = {
-  /** Save a pet image file and return public URL. */
-  async savePetImageFile(petId: string, file: File) {
-    const extFromType = file.type?.includes('/') ? file.type.split('/')[1] : 'jpg';
-    const safeExt = sanitizeFileName(extFromType || 'jpg');
-    const safeName = sanitizeFileName(file.name || `pet.${safeExt}`);
-
+  /** Save compressed pet image bytes and return public URL. */
+  async savePetImageFile(petId: string, sourceName: string, bytes: Buffer) {
+    const base = sanitizeFileName(sourceName.replace(/\.[^.]+$/, '') || 'pet');
     const dir = path.join(UPLOAD_ROOT, 'pets', petId);
     await mkdir(dir, { recursive: true });
 
-    const filename = `${Date.now()}-${safeName}`;
+    const filename = `${Date.now()}-${base}.jpg`;
     const absolutePath = path.join(dir, filename);
-
-    const bytes = Buffer.from(await file.arrayBuffer());
     await writeFile(absolutePath, bytes);
 
     return `/api/v1/uploads/pets/${petId}/${filename}`;
+  },
+
+  /** Validate and compress an uploaded pet image. */
+  async preparePetImageUpload(file: File) {
+    if (!file) throw new ValidationError('file is required');
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      throw new ValidationError('Invalid file type. Use JPG, PNG, or WebP');
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      throw new ValidationError('File too large. Max 10MB');
+    }
+
+    const originalBytes = Buffer.from(await file.arrayBuffer());
+    const compressedBytes = await compressPetImageToJpeg(originalBytes);
+
+    return {
+      compressedBytes,
+      hash: sha256(compressedBytes),
+      sourceName: file.name || 'pet.jpg',
+    };
   },
 
   /** Create a pet. */
@@ -79,7 +118,8 @@ export const PetsService = {
     if (!created) throw new ValidationError('Failed to create pet');
 
     if (file) {
-      const photoUrl = await this.savePetImageFile(created.id, file);
+      const prepared = await this.preparePetImageUpload(file);
+      const photoUrl = await this.savePetImageFile(created.id, prepared.sourceName, prepared.compressedBytes);
       const updated = await PetsModel.updateById(userId, created.id, { photoUrl });
       return { message: 'Pet created successfully', pet: updated ?? created };
     }
@@ -114,8 +154,23 @@ export const PetsService = {
 
     let nextPhotoUrl: string | undefined;
     if (file) {
-      nextPhotoUrl = await this.savePetImageFile(petId, file);
-      await deleteLocalUploadByUrl(current.photoUrl);
+      const prepared = await this.preparePetImageUpload(file);
+      const previousPath = resolveLocalUploadPathFromUrl(current.photoUrl);
+      if (previousPath) {
+        try {
+          const previousHash = sha256(await readFile(previousPath));
+          if (previousHash === prepared.hash) {
+            nextPhotoUrl = current.photoUrl ?? undefined;
+          }
+        } catch {
+          // If old file is missing/corrupt, continue with normal replacement.
+        }
+      }
+
+      if (!nextPhotoUrl) {
+        nextPhotoUrl = await this.savePetImageFile(petId, prepared.sourceName, prepared.compressedBytes);
+        await deleteLocalUploadByUrl(current.photoUrl);
+      }
     }
 
     const updated = await PetsModel.updateById(userId, petId, {
@@ -140,15 +195,34 @@ export const PetsService = {
   async uploadPetImage(userId: string, petId: string, file: File) {
     const pet = await PetsModel.getById(userId, petId);
     if (!pet) throw new ValidationError('Pet not found');
-    if (!file) throw new ValidationError('file is required');
 
-    const photoUrl = await this.savePetImageFile(petId, file);
+    const prepared = await this.preparePetImageUpload(file);
+
+    const previousPath = resolveLocalUploadPathFromUrl(pet.photoUrl);
+    if (previousPath) {
+      try {
+        const previousHash = sha256(await readFile(previousPath));
+        if (previousHash === prepared.hash) {
+          return {
+            message: 'Image unchanged. Existing pet image kept.',
+            photoUrl: pet.photoUrl,
+            deduplicated: true,
+            pet,
+          };
+        }
+      } catch {
+        // If old file cannot be read, proceed with replacement.
+      }
+    }
+
+    const photoUrl = await this.savePetImageFile(petId, prepared.sourceName, prepared.compressedBytes);
     await deleteLocalUploadByUrl(pet.photoUrl);
     const updated = await PetsModel.updateById(userId, petId, { photoUrl });
 
     return {
-      message: 'Pet image uploaded successfully',
+      message: 'Pet image uploaded successfully. AI analysis pending.',
       photoUrl,
+      deduplicated: false,
       pet: updated,
     };
   },
