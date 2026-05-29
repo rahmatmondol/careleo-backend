@@ -6,6 +6,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  integer,
   uniqueIndex,
   uuid,
   varchar,
@@ -169,5 +170,32 @@ export const deviceTokens = pgTable(
     uniqueIndex('device_tokens_fcm_token_unique').on(table.fcmToken),
     index('idx_device_tokens_user_id').on(table.userId),
     index('idx_device_tokens_is_active').on(table.isActive),
+  ],
+);
+
+/**
+ * Push notification delivery logs for admin + automated campaigns.
+ */
+export const notificationLogs = pgTable(
+  'notification_logs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    type: varchar('type', { length: 40 }).notNull(),
+    title: varchar('title', { length: 200 }).notNull(),
+    body: text('body').notNull(),
+    dataJson: text('data_json'),
+    targetMode: varchar('target_mode', { length: 20 }).notNull(),
+    targetUserIds: text('target_user_ids'),
+    status: varchar('status', { length: 20 }).notNull().default('queued'),
+    successCount: integer('success_count').notNull().default(0),
+    failureCount: integer('failure_count').notNull().default(0),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_notification_logs_type').on(table.type),
+    index('idx_notification_logs_status').on(table.status),
+    index('idx_notification_logs_created_at').on(table.createdAt),
   ],
 );

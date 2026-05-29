@@ -1,5 +1,6 @@
 import { ValidationError } from '@/shared/errors';
 import { TasksModel } from './model';
+import { NotificationsService } from '@/modules/notifications/service';
 
 const normalizeText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -34,6 +35,22 @@ export const TasksService = {
     });
 
     if (!row) throw new ValidationError('Failed to create task');
+
+    try {
+      await NotificationsService.sendToUsers(
+        [userId],
+        {
+          title: 'New task created',
+          body: `${title} task has been created`,
+          data: { taskId: row.id, event: 'task_created' },
+          type: 'TASK_CREATED',
+        },
+        { targetMode: 'single' },
+      );
+    } catch {
+      // Don't block task create if push delivery fails.
+    }
+
     return { message: 'Task created successfully', task: row };
   },
 

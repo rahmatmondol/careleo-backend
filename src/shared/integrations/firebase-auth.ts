@@ -25,6 +25,11 @@ export const getFirebaseAuth = () => {
   return admin.auth(firebaseApp);
 };
 
+export const getFirebaseMessaging = () => {
+  if (!firebaseApp) initializeFirebase();
+  return admin.messaging(firebaseApp);
+};
+
 /**
  * Firebase Auth Service
  * Handles token verification and user management

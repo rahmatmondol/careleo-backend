@@ -1,5 +1,6 @@
 import { ValidationError } from '@/shared/errors';
 import { RemindersModel } from './model';
+import { NotificationsService } from '@/modules/notifications/service';
 
 const normalizeText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -29,6 +30,22 @@ export const RemindersService = {
     });
 
     if (!row) throw new ValidationError('Failed to create reminder');
+
+    try {
+      await NotificationsService.sendToUsers(
+        [userId],
+        {
+          title: 'Reminder created',
+          body: `${title} reminder has been created`,
+          data: { reminderId: row.id, event: 'reminder_created' },
+          type: 'REMINDER_CREATED',
+        },
+        { targetMode: 'single' },
+      );
+    } catch {
+      // Don't block reminder create if push delivery fails.
+    }
+
     return { message: 'Reminder created successfully', reminder: row };
   },
 

@@ -3,6 +3,7 @@ import { ValidationError, UnauthorizedError } from '@/shared/errors';
 import { AuthModel } from './model';
 import { ROLE_PERMISSIONS } from '@/shared/auth/rbac';
 import { verifyFirebaseIdToken } from '@/shared/integrations/firebase';
+import { NotificationsService } from '@/modules/notifications/service';
 
 const splitName = (name?: string | null) => {
   const raw = (name ?? '').trim();
@@ -58,6 +59,17 @@ export const AuthService = {
     });
 
     if (!created) throw new ValidationError('Unable to create user');
+
+    const fcmToken = String(payload.fcmToken ?? '').trim();
+    const platform = String(payload.platform ?? '').trim().toLowerCase();
+    if (fcmToken && platform) {
+      await NotificationsService.registerDeviceToken(created.id, {
+        fcmToken,
+        platform,
+        appVersion: payload.appVersion,
+      });
+    }
+
     return buildProfile(created);
   },
 
@@ -74,6 +86,17 @@ export const AuthService = {
     if (!passwordOk) throw new UnauthorizedError('Invalid email or password');
 
     await AuthModel.touchLastLogin(user.id);
+
+    const fcmToken = String(payload.fcmToken ?? '').trim();
+    const platform = String(payload.platform ?? '').trim().toLowerCase();
+    if (fcmToken && platform) {
+      await NotificationsService.registerDeviceToken(user.id, {
+        fcmToken,
+        platform,
+        appVersion: payload.appVersion,
+      });
+    }
+
     return {
       ...buildProfile(user),
       permissions: ROLE_PERMISSIONS[user.role],
@@ -119,6 +142,16 @@ export const AuthService = {
 
     if (!user) throw new UnauthorizedError('Unable to authenticate firebase user');
     await AuthModel.touchLastLogin(user.id);
+
+    const fcmToken = String(payload.fcmToken ?? '').trim();
+    const platform = String(payload.platform ?? '').trim().toLowerCase();
+    if (fcmToken && platform) {
+      await NotificationsService.registerDeviceToken(user.id, {
+        fcmToken,
+        platform,
+        appVersion: payload.appVersion,
+      });
+    }
 
     return {
       ...buildProfile(user),
