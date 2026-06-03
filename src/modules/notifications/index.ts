@@ -28,6 +28,29 @@ export const notificationsController = new Elysia({ name: 'notifications-control
         const { headers, jwt, body } = ctx;
         const authUser = await requireAuth(headers, jwt);
         return NotificationsService.removeDeviceToken(authUser.id, body as Record<string, unknown>);
+      })
+      // ── User-facing notification list & badge ──
+      .get('/', async (ctx: any) => {
+        const { headers, jwt, query } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+        const limit = Number((query as any)?.limit ?? 50);
+        const cursor = String((query as any)?.cursor ?? '').trim() || undefined;
+        return NotificationsService.listUserNotifications(authUser.id, Number.isNaN(limit) ? 50 : Math.min(100, Math.max(1, limit)), cursor);
+      })
+      .get('/unread-count', async (ctx: any) => {
+        const { headers, jwt } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+        return NotificationsService.countUnreadNotifications(authUser.id);
+      })
+      .put('/read/:id', async (ctx: any) => {
+        const { headers, jwt, params } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+        return NotificationsService.markNotificationRead(String(params.id), authUser.id);
+      })
+      .put('/read-all', async (ctx: any) => {
+        const { headers, jwt } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+        return NotificationsService.markAllNotificationsRead(authUser.id);
       }),
   )
   .group('/admin/notifications', (app) =>

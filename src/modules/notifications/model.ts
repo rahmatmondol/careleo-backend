@@ -1,6 +1,6 @@
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { deviceTokens, notificationLogs, users } from '@/shared/db/schema';
+import { deviceTokens, notificationLogs, userNotifications, users } from '@/shared/db/schema';
 
 export const NotificationsModel = {
   async upsertDeviceToken(payload: { userId: string; fcmToken: string; platform: string; appVersion?: string }) {
@@ -106,5 +106,70 @@ export const NotificationsModel = {
 
   async listLogs(limit = 50) {
     return db.select().from(notificationLogs).orderBy(desc(notificationLogs.createdAt)).limit(limit);
+  },
+
+  // ── User-facing notifications ─────────────────────────────────
+
+  async insertUserNotification(payload: {
+    userId: string;
+    type: string;
+    title: string;
+    body: string;
+    dataJson?: string;
+  }) {
+    const row = await db
+      .insert(userNotifications)
+      .values({
+        userId: payload.userId,
+        type: payload.type,
+        title: payload.title,
+        body: payload.body,
+        dataJson: payload.dataJson,
+      })
+      .returning();
+    return row[0] ?? null;
+  },
+
+  async listUserNotifications(userId: string, limit = 50, cursor?: string) {
+    const conditions = [eq(userNotifications.userId, userId)];
+    if (cursor) {
+      conditions.push(lt(userNotifications.createdAt, new Date(cursor)));
+    }
+    const rows = await db
+      .select()
+      .from(userNotifications)
+      .where(and(...conditions))
+      .orderBy(desc(userNotifications.createdAt))
+      .limit(limit + 1);
+
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = items.length ? String(items[items.length - 1].createdAt) : null;
+
+    return { notifications: items, hasMore, nextCursor };
+  },
+
+  async countUnreadNotifications(userId: string) {
+    const rows = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(userNotifications)
+      .where(and(eq(userNotifications.userId, userId), eq(userNotifications.isRead, false)));
+    return Number(rows[0]?.count ?? 0);
+  },
+
+  async markNotificationRead(id: string, userId: string) {
+    const row = await db
+      .update(userNotifications)
+      .set({ isRead: true, readAt: new Date() })
+      .where(and(eq(userNotifications.id, id), eq(userNotifications.userId, userId)))
+      .returning();
+    return row[0] ?? null;
+  },
+
+  async markAllNotificationsRead(userId: string) {
+    await db
+      .update(userNotifications)
+      .set({ isRead: true, readAt: new Date() })
+      .where(and(eq(userNotifications.userId, userId), eq(userNotifications.isRead, false)));
   },
 };

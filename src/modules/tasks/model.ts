@@ -1,7 +1,6 @@
 import { and, desc, eq } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { tasks } from '@/shared/db/schema';
-import { pets } from '@/shared/db/schema';
+import { pets, tasks } from '@/shared/db/schema';
 
 export const TasksModel = {
   /** Ensure pet belongs to user before task operations. */
@@ -20,6 +19,7 @@ export const TasksModel = {
     petId: string;
     title: string;
     taskType: string;
+    frequency?: string;
     dueDate: Date;
     notes?: string;
   }) {
@@ -27,9 +27,27 @@ export const TasksModel = {
     return rows[0] ?? null;
   },
 
-  /** List tasks for authenticated user. */
+  /** List tasks for authenticated user with pet name. */
   async listTasks(userId: string) {
-    return db.select().from(tasks).where(eq(tasks.userId, userId)).orderBy(desc(tasks.dueDate), desc(tasks.createdAt));
+    return db
+      .select({
+        id: tasks.id,
+        userId: tasks.userId,
+        petId: tasks.petId,
+        petName: pets.name,
+        title: tasks.title,
+        taskType: tasks.taskType,
+        frequency: tasks.frequency,
+        dueDate: tasks.dueDate,
+        notes: tasks.notes,
+        isCompleted: tasks.isCompleted,
+        createdAt: tasks.createdAt,
+        updatedAt: tasks.updatedAt,
+      })
+      .from(tasks)
+      .innerJoin(pets, eq(tasks.petId, pets.id))
+      .where(eq(tasks.userId, userId))
+      .orderBy(desc(tasks.dueDate), desc(tasks.createdAt));
   },
 
   /** Get one task by id/user. */
@@ -46,7 +64,7 @@ export const TasksModel = {
   async updateTask(
     userId: string,
     id: string,
-    payload: Partial<{ title: string; taskType: string; dueDate: Date; notes: string; isCompleted: boolean }>,
+    payload: Partial<{ title: string; taskType: string; frequency: string; dueDate: Date; notes: string; isCompleted: boolean }>,
   ) {
     await db.update(tasks).set({ ...payload, updatedAt: new Date() }).where(and(eq(tasks.id, id), eq(tasks.userId, userId)));
     return this.getTask(userId, id);

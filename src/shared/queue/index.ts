@@ -1,7 +1,7 @@
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
 import { and, eq, gte, lte } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { reminders, taskReminderLogs, tasks } from '@/shared/db/schema';
+import { pets, reminders, taskReminderLogs, tasks } from '@/shared/db/schema';
 import { NotificationsService } from '@/modules/notifications/service';
 
 const redisUrl = String(process.env.REDIS_URL ?? '').trim() || 'redis://localhost:6379';
@@ -130,10 +130,13 @@ const handleTaskReminderJob = async (taskId: string, reminderMinutes: number, du
       userId: tasks.userId,
       title: tasks.title,
       taskType: tasks.taskType,
+      petId: tasks.petId,
+      petName: pets.name,
       isCompleted: tasks.isCompleted,
       dueDate: tasks.dueDate,
     })
     .from(tasks)
+    .innerJoin(pets, eq(tasks.petId, pets.id))
     .where(eq(tasks.id, taskId))
     .limit(1);
 
@@ -142,11 +145,13 @@ const handleTaskReminderJob = async (taskId: string, reminderMinutes: number, du
   if (t.isCompleted) return;
   if (dueDate && new Date(t.dueDate as any).toISOString() !== dueDate) return;
 
+  const petName = String(t.petName ?? '');
+  const taskType = String(t.taskType ?? '').toLowerCase();
   const result = await NotificationsService.sendToUsers(
     [String(t.userId)],
     {
-      title: `Task reminder ${reminderMinutes}min`,
-      body: `"${String(t.title)}" is not completed yet`,
+      title: petName ? `${petName}'s ${taskType} is overdue` : `"${String(t.title)}" is overdue`,
+      body: `${reminderMinutes} minutes overdue — please complete "${String(t.title)}"`,
       data: { taskId: String(t.id), event: `task_reminder_${reminderMinutes}`, reminderMinutes: String(reminderMinutes) },
       type: `TASK_REMINDER`,
     },
@@ -359,8 +364,18 @@ export const startNotificationsWorker = () => {
         if (!taskId || !userId) return;
 
         const rows = await db
-          .select({ id: tasks.id, userId: tasks.userId, title: tasks.title, dueDate: tasks.dueDate, isCompleted: tasks.isCompleted })
+          .select({
+            id: tasks.id,
+            userId: tasks.userId,
+            title: tasks.title,
+            taskType: tasks.taskType,
+            petId: tasks.petId,
+            petName: pets.name,
+            dueDate: tasks.dueDate,
+            isCompleted: tasks.isCompleted,
+          })
           .from(tasks)
+          .innerJoin(pets, eq(tasks.petId, pets.id))
           .where(eq(tasks.id, taskId))
           .limit(1);
 
@@ -369,9 +384,16 @@ export const startNotificationsWorker = () => {
         if (t.isCompleted) return;
         if (dueDate && new Date(t.dueDate as any).toISOString() !== dueDate) return;
 
+        const petName = String(t.petName ?? '');
+        const taskType = String(t.taskType ?? '').toLowerCase();
         await NotificationsService.sendToUsers(
           [String(t.userId)],
-          { title: 'Task due', body: `${String(t.title)} is due now`, data: { taskId: String(t.id), event: 'task_due' }, type: 'TASK_DUE' },
+          {
+            title: petName ? `Time for ${petName}'s ${taskType}` : `"${String(t.title)}" is due now`,
+            body: `"${String(t.title)}" is due now`,
+            data: { taskId: String(t.id), event: 'task_due' },
+            type: 'TASK_DUE',
+          },
           { targetMode: 'single' },
         );
         return;

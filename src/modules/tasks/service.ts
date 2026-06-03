@@ -1,6 +1,5 @@
 import { ValidationError } from '@/shared/errors';
 import { TasksModel } from './model';
-import { NotificationsService } from '@/modules/notifications/service';
 import { scheduleTaskDuePush, unscheduleAllTaskReminderJobs, unscheduleTaskDuePush } from '@/shared/queue';
 
 const normalizeText = (value: unknown): string | undefined => {
@@ -31,26 +30,12 @@ export const TasksService = {
       petId,
       title,
       taskType: normalizeText(payload.taskType) ?? 'OTHER',
+      frequency: normalizeText(payload.frequency) ?? 'none',
       dueDate,
       notes: normalizeText(payload.notes),
     });
 
     if (!row) throw new ValidationError('Failed to create task');
-
-    try {
-      await NotificationsService.sendToUsers(
-        [userId],
-        {
-          title: 'New task created',
-          body: `${title} task has been created`,
-          data: { taskId: row.id, event: 'task_created' },
-          type: 'TASK_CREATED',
-        },
-        { targetMode: 'single' },
-      );
-    } catch {
-      // Don't block task create if push delivery fails.
-    }
 
     try {
       await scheduleTaskDuePush(row.id);
@@ -74,10 +59,11 @@ export const TasksService = {
 
   /** Update user task. */
   async update(userId: string, id: string, payload: Record<string, unknown>) {
-    const updatePayload: Partial<{ title: string; taskType: string; dueDate: Date; notes: string; isCompleted: boolean }> = {};
+    const updatePayload: Partial<{ title: string; taskType: string; frequency: string; dueDate: Date; notes: string; isCompleted: boolean }> = {};
 
     if (payload.title !== undefined) updatePayload.title = normalizeText(payload.title);
     if (payload.taskType !== undefined) updatePayload.taskType = normalizeText(payload.taskType);
+    if (payload.frequency !== undefined) updatePayload.frequency = normalizeText(payload.frequency);
     if (payload.dueDate !== undefined) {
       const dueDate = parseDate(payload.dueDate);
       if (!dueDate) throw new ValidationError('Invalid dueDate');

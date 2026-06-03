@@ -17,6 +17,7 @@ export const tasks = pgTable(
       .references(() => pets.id, { onDelete: 'cascade' }),
     title: varchar('title', { length: 180 }).notNull(),
     taskType: varchar('task_type', { length: 60 }).notNull().default('OTHER'),
+    frequency: varchar('frequency', { length: 40 }).notNull().default('none'),
     dueDate: timestamp('due_date', { withTimezone: true }).notNull(),
     notes: text('notes'),
     isCompleted: boolean('is_completed').notNull().default(false),

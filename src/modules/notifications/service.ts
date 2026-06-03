@@ -3,7 +3,7 @@ import { sendPushToTokens } from '@/shared/integrations/firebase';
 import { and, eq, gte, lte, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
 import { NotificationsModel } from './model';
-import { reminders, tasks } from '@/shared/db/schema';
+import { pets, reminders, tasks } from '@/shared/db/schema';
 
 type PushPayload = {
   title: string;
@@ -187,6 +187,18 @@ export const NotificationsService = {
       });
     } catch {}
 
+    try {
+      for (const uid of userIds) {
+        await NotificationsModel.insertUserNotification({
+          userId: uid,
+          type: payload.type ?? 'SYSTEM',
+          title: payload.title,
+          body: payload.body,
+          dataJson: JSON.stringify(payload.data ?? {}),
+        });
+      }
+    } catch {}
+
     return { sent: successCount, failed: failureCount, users: userIds.length };
   },
 
@@ -226,6 +238,28 @@ export const NotificationsService = {
   async logList(limit = 50) {
     return { logs: await NotificationsModel.listLogs(limit) };
   },
+
+  // ── User-facing notification methods ─────────────────────
+
+  async listUserNotifications(userId: string, limit = 50, cursor?: string) {
+    return NotificationsModel.listUserNotifications(userId, limit, cursor);
+  },
+
+  async countUnreadNotifications(userId: string) {
+    const count = await NotificationsModel.countUnreadNotifications(userId);
+    return { unreadCount: count };
+  },
+
+  async markNotificationRead(id: string, userId: string) {
+    const row = await NotificationsModel.markNotificationRead(id, userId);
+    if (!row) throw new ValidationError('Notification not found');
+    return { notification: row };
+  },
+
+  async markAllNotificationsRead(userId: string) {
+    await NotificationsModel.markAllNotificationsRead(userId);
+    return { success: true };
+  },
 };
 
 export const startTaskReminderPushScheduler = () => {
@@ -240,8 +274,17 @@ export const startTaskReminderPushScheduler = () => {
 
     try {
       const dueTasks = await db
-        .select({ id: tasks.id, userId: tasks.userId, title: tasks.title, dueDate: tasks.dueDate })
+        .select({
+          id: tasks.id,
+          userId: tasks.userId,
+          title: tasks.title,
+          taskType: tasks.taskType,
+          petId: tasks.petId,
+          petName: pets.name,
+          dueDate: tasks.dueDate,
+        })
         .from(tasks)
+        .innerJoin(pets, eq(tasks.petId, pets.id))
         .where(and(eq(tasks.isCompleted, false), gte(tasks.dueDate, windowStart), lte(tasks.dueDate, windowEnd)));
 
       for (const t of dueTasks) {
@@ -249,11 +292,13 @@ export const startTaskReminderPushScheduler = () => {
         const already = await notificationLoggedRecently('TASK_DUE', key, new Date(now.getTime() - 6 * 60 * 60 * 1000));
         if (already) continue;
         try {
+          const petName = String(t.petName ?? '');
+          const taskType = String(t.taskType ?? '').toLowerCase();
           await NotificationsService.sendToUsers(
             [t.userId],
             {
-              title: 'Task due',
-              body: `${t.title} is due now`,
+              title: petName ? `Time for ${petName}'s ${taskType}` : `"${String(t.title)}" is due now`,
+              body: `"${String(t.title)}" is due now`,
               data: { taskId: String(t.id), event: 'task_due' },
               type: 'TASK_DUE',
             },

@@ -12,3 +12,4 @@ export * from './adoption.schema';
 export * from './vets.schema';
 export * from './walkers.schema';
 export * from './task-reminder-logs.schema';
+export * from './user-notifications.schema';
