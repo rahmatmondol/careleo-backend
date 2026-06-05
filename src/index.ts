@@ -24,6 +24,7 @@ loadDotEnv();
 const { app } = await import('./app');
 const { AuthModel } = await import('./modules/auth/model');
 const { startNotificationsWorker, bootstrapNotificationSchedules } = await import('./shared/queue');
+const { startJobs } = await import('./jobs');
 
 const port = Number(process.env.PORT || 3000);
 
@@ -35,4 +36,5 @@ startNotificationsWorker();
 try {
   await bootstrapNotificationSchedules();
 } catch {}
+startJobs();
 console.log(`🚀 Careleo backend running at http://localhost:${port}`);

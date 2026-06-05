@@ -21,6 +21,7 @@ export const pets = pgTable(
     microchipId: varchar('microchip_id', { length: 120 }),
     description: text('description'),
     photoUrl: text('photo_url'),
+    aiAnalysisJson: text('ai_analysis_json'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

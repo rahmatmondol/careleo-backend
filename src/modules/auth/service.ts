@@ -25,7 +25,7 @@ const buildProfile = (user: any) => ({
   state: user.state ?? null,
   country: user.country ?? null,
   postalCode: user.postalCode ?? null,
-  role: user.role,
+  role: user.role ?? 'customer',
   provider: user.provider,
 });
 
