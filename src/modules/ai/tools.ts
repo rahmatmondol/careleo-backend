@@ -20,14 +20,14 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'create_task',
     description: 'Create a new care task for a pet (feeding, walk, medicine, grooming, etc.)',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        petId:     { type: 'STRING', description: 'The pet ID to create the task for' },
-        title:     { type: 'STRING', description: 'Task title e.g. "Buddy morning walk"' },
-        taskType:  { type: 'STRING', description: 'One of: FEEDING, EXERCISE, MEDICINE, GROOMING, VET_VISIT, OTHER' },
-        dueDate:   { type: 'STRING', description: 'ISO date-time string for when the task is due' },
-        frequency: { type: 'STRING', description: 'One of: daily, weekly, monthly, none' },
-        notes:     { type: 'STRING', description: 'Optional notes or instructions' },
+        petId:     { type: 'string', description: 'The pet ID to create the task for' },
+        title:     { type: 'string', description: 'Task title e.g. "Buddy morning walk"' },
+        taskType:  { type: 'string', description: 'One of: FEEDING, EXERCISE, MEDICINE, GROOMING, VET_VISIT, OTHER' },
+        dueDate:   { type: 'string', description: 'ISO date-time string for when the task is due' },
+        frequency: { type: 'string', description: 'One of: daily, weekly, monthly, none' },
+        notes:     { type: 'string', description: 'Optional notes or instructions' },
       },
       required: ['petId', 'title'],
     },
@@ -36,9 +36,9 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'complete_task',
     description: 'Mark a task as completed',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        taskId: { type: 'STRING', description: 'The task ID to mark as completed' },
+        taskId: { type: 'string', description: 'The task ID to mark as completed' },
       },
       required: ['taskId'],
     },
@@ -47,9 +47,9 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'get_upcoming_tasks',
     description: "Get a pet's upcoming or pending tasks",
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        petId: { type: 'STRING', description: 'The pet ID' },
+        petId: { type: 'string', description: 'The pet ID' },
       },
       required: ['petId'],
     },
@@ -59,13 +59,13 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'set_reminder',
     description: 'Set a reminder for a pet care activity',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        petId:        { type: 'STRING', description: 'The pet ID' },
-        title:        { type: 'STRING', description: 'Reminder title' },
-        reminderTime: { type: 'STRING', description: 'ISO date-time for the reminder' },
-        frequency:    { type: 'STRING', description: 'One of: Everyday, Weekly, Monthly, Once' },
-        notes:        { type: 'STRING', description: 'Optional notes' },
+        petId:        { type: 'string', description: 'The pet ID' },
+        title:        { type: 'string', description: 'Reminder title' },
+        reminderTime: { type: 'string', description: 'ISO date-time for the reminder' },
+        frequency:    { type: 'string', description: 'One of: Everyday, Weekly, Monthly, Once' },
+        notes:        { type: 'string', description: 'Optional notes' },
       },
       required: ['petId', 'title', 'reminderTime'],
     },
@@ -74,7 +74,7 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'list_reminders',
     description: "List all active reminders for the user's pets",
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {},
       required: [],
     },
@@ -84,9 +84,9 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'get_pet_info',
     description: 'Get detailed profile and health information for a specific pet',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        petId: { type: 'STRING', description: 'The pet ID' },
+        petId: { type: 'string', description: 'The pet ID' },
       },
       required: ['petId'],
     },
@@ -95,7 +95,7 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'get_all_pets',
     description: "Get a list of all pets belonging to the user",
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {},
       required: [],
     },
@@ -105,11 +105,11 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'search_products',
     description: 'Search the Careleo store for pet products (food, toys, medicine, accessories)',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        query:    { type: 'STRING', description: 'Search query e.g. "weight management large breed dog food"' },
-        category: { type: 'STRING', description: 'Optional category filter: food, toy, medicine, accessory, supplement' },
-        petType:  { type: 'STRING', description: 'Optional: dog, cat, bird, etc.' },
+        query:    { type: 'string', description: 'Search query e.g. "weight management large breed dog food"' },
+        category: { type: 'string', description: 'Optional category filter: food, toy, medicine, accessory, supplement' },
+        petType:  { type: 'string', description: 'Optional: dog, cat, bird, etc.' },
       },
       required: ['query'],
     },
@@ -119,9 +119,9 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'get_care_plan',
     description: "Get the current AI-generated care plan for a pet",
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        petId: { type: 'STRING', description: 'The pet ID' },
+        petId: { type: 'string', description: 'The pet ID' },
       },
       required: ['petId'],
     },
@@ -130,9 +130,9 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'regenerate_care_plan',
     description: 'Regenerate and update the care plan for a pet based on latest data',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        petId: { type: 'STRING', description: 'The pet ID' },
+        petId: { type: 'string', description: 'The pet ID' },
       },
       required: ['petId'],
     },
@@ -142,10 +142,10 @@ export const AI_TOOL_DECLARATIONS = [
     name: 'send_notification',
     description: 'Send a push notification to the user',
     parameters: {
-      type: 'OBJECT',
+      type: 'object',
       properties: {
-        title: { type: 'STRING', description: 'Notification title' },
-        body:  { type: 'STRING', description: 'Notification message body' },
+        title: { type: 'string', description: 'Notification title' },
+        body:  { type: 'string', description: 'Notification message body' },
       },
       required: ['title', 'body'],
     },
