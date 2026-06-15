@@ -1,0 +1,160 @@
+# =============================================================
+# CareLeo Hybrid Stack
+#   api-gateway (:8080)  -> single entry point
+#     /api/v1/shop/*     -> shop-service   (:3004)
+#     /api/v1/social/*   -> social-service (:3008)
+#     /api/v1/video/*    -> video-service  (:3014)
+#     /api/v1/*          -> careleo-backend (:3000)  [catch-all]
+#   postgres (:5433) + redis (:6379) shared infra
+# =============================================================
+
+services:
+  # ---------- Infrastructure ----------
+  careleo-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: careleo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: careleo
+      POSTGRES_USER: careleo
+      POSTGRES_PASSWORD: careleo_dev_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - careleo_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U careleo -d careleo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  careleo-redis:
+    image: redis:7-alpine
+    container_name: careleo-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - careleo_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ---------- API Gateway ----------
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: careleo-gateway
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      CARELEO_SERVICE_URL: http://careleo-backend:3000
+      SHOP_SERVICE_URL: http://shop-service:3004
+      SOCIAL_SERVICE_URL: http://social-service:3008
+      VIDEO_SERVICE_URL: http://video-service:3014
+      MEDIA_SERVICE_URL: http://media-service:3017
+    ports:
+      - "8090:8080"
+    depends_on:
+      - careleo-backend
+      - shop-service
+      - social-service
+      - video-service
+      - media-service
+
+  # ---------- careleo-backend (monolith catch-all) ----------
+  careleo-backend:
+    build: .
+    container_name: careleo-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      API_PREFIX: /api/v1
+      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo
+      REDIS_URL: redis://careleo-redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-super_secret_refresh_key_change_in_prod}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_GEMINI_API_KEY: ${GOOGLE_GEMINI_API_KEY:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      careleo-postgres:
+        condition: service_healthy
+      careleo-redis:
+        condition: service_healthy
+
+  # ---------- shop-service ----------
+  shop-service:
+    build: ./services/shop-service
+    container_name: careleo-shop
+    restart: unless-stopped
+    environment:
+      PORT: "3004"
+      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_shop
+      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
+    ports:
+      - "3004:3004"
+    depends_on:
+      careleo-postgres:
+        condition: service_healthy
+
+  # ---------- social-service ----------
+  social-service:
+    build: ./services/social-service
+    container_name: careleo-social
+    restart: unless-stopped
+    environment:
+      PORT: "3008"
+      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_social
+      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
+    ports:
+      - "3008:3008"
+    depends_on:
+      careleo-postgres:
+        condition: service_healthy
+
+  # ---------- video-service ----------
+  video-service:
+    build: ./services/video-service
+    container_name: careleo-video
+    restart: unless-stopped
+    environment:
+      PORT: "3014"
+      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_video
+      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
+    ports:
+      - "3014:3014"
+    depends_on:
+      careleo-postgres:
+        condition: service_healthy
+
+  # ---------- media-service ----------
+  media-service:
+    build: ./services/media-service
+    container_name: careleo-media
+    restart: unless-stopped
+    environment:
+      PORT: "3017"
+      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_media
+      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:-pawly-internal}
+      MEDIA_STORAGE_DRIVER: local
+      MEDIA_LOCAL_UPLOAD_DIR: /app/uploads/media
+      MEDIA_PUBLIC_BASE_URL: http://localhost:8090/api/v1/media/files
+    ports:
+      - "3017:3017"
+    volumes:
+      - careleo_media_uploads:/app/uploads/media
+    depends_on:
+      careleo-postgres:
+        condition: service_healthy
+
+volumes:
+  careleo_pg_data:
+  careleo_redis_data:
+  careleo_media_uploads:

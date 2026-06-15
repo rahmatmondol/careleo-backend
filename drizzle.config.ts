@@ -5,7 +5,7 @@ import type { Config } from 'drizzle-kit';
  * Reads DATABASE_URL from environment.
  */
 export default {
-  schema: './src/shared/db/schema/auth.ts',
+  schema: './src/shared/db/schema/index.ts',
   out: './db/migrations/drizzle',
   dialect: 'postgresql',
   dbCredentials: {

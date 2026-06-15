@@ -10,7 +10,7 @@
   - `bun services/tests/core-services.smoke.test.ts`
 
 ## 2) Canary Rollout
-1. Start all services using `docker compose -f docker-compose.microservices.yml up -d`.
+1. Start all services using `docker compose -f docker-compose.hybrid.yml up -d`.
 2. Route 5% of traffic to microservice endpoints from gateway.
 3. Observe for 30 minutes:
    - 5xx rate < 1%

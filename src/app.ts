@@ -14,7 +14,6 @@ import { petsController } from './modules/pets/index';
 import { tasksController } from './modules/tasks/index';
 import { remindersController } from './modules/reminders/index';
 import { aiController } from './modules/ai/index';
-import { storebridgeController } from './modules/store-bridge/index';
 import { adminController } from './modules/admin/index';
 import { auditController } from './modules/audit/index';
 import { syncController } from './modules/sync/index';
@@ -70,7 +69,6 @@ export const app = new Elysia()
       .use(tasksController)
       .use(remindersController)
       .use(aiController)
-      .use(storebridgeController)
       .use(adminController)
       .use(auditController)
       .use(syncController)
