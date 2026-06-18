@@ -8,7 +8,8 @@ export type Permission =
   | 'pets.write'
   | 'orders.read'
   | 'orders.write'
-  | 'sync.manage';
+  | 'sync.manage'
+  | 'plans.manage';
 
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   super_admin: [
@@ -20,8 +21,17 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'orders.read',
     'orders.write',
     'sync.manage',
+    'plans.manage',
   ],
-  admin: ['users.read', 'pets.read', 'pets.write', 'orders.read', 'orders.write', 'sync.manage'],
+  admin: [
+    'users.read',
+    'pets.read',
+    'pets.write',
+    'orders.read',
+    'orders.write',
+    'sync.manage',
+    'plans.manage',
+  ],
   support: ['users.read', 'pets.read', 'orders.read'],
   customer: ['pets.read', 'pets.write'],
 };

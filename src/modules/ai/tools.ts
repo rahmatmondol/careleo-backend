@@ -10,6 +10,8 @@ import { NotificationsService } from '../notifications/service';
 import { CarePlanService } from './care-plan';
 import { AiModel } from './model';
 import { WooCommerceService } from '@/modules/integrations/woocommerce/service';
+import { can } from '@/modules/subscriptions/entitlements';
+import type { FeatureKey } from '@/modules/subscriptions/catalog';
 
 // ─── Gemini Function Declarations ─────────────────────────────────────────
 // These are passed to the model so it knows what tools it can call.
@@ -152,6 +154,15 @@ export const AI_TOOL_DECLARATIONS = [
   },
 ];
 
+// ─── Tier gating ───────────────────────────────────────────────────────────
+// Maps a tool to the subscription feature it requires. Tools not listed here
+// are available on every tier (the AI's baseline abilities). When a user's
+// plan lacks the feature, the tool is not executed; the AI receives a polite
+// "not on your plan" result instead so it can suggest an upgrade.
+const TOOL_REQUIRED_FEATURE: Partial<Record<string, FeatureKey>> = {
+  search_products: 'product_recommend',
+};
+
 // ─── Tool Executor ─────────────────────────────────────────────────────────
 // Called with the function name + args from Gemini's response.
 
@@ -161,6 +172,18 @@ export async function executeTool(
   userId: string,
 ): Promise<string> {
   try {
+    // Tier gate: block tools whose feature is not on the user's plan.
+    const requiredFeature = TOOL_REQUIRED_FEATURE[toolName];
+    if (requiredFeature && !(await can(userId, requiredFeature))) {
+      return JSON.stringify({
+        success: false,
+        notEntitled: true,
+        message:
+          `This action ("${toolName}") isn't included in the user's current plan. ` +
+          `Let the user know this is a paid feature and offer to help them upgrade, instead of performing the action.`,
+      });
+    }
+
     switch (toolName) {
 
       // ── Task tools ────────────────────────────────────────────────────

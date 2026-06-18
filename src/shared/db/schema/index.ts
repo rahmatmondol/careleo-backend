@@ -13,3 +13,4 @@ export * from './vets.schema';
 export * from './walkers.schema';
 export * from './task-reminder-logs.schema';
 export * from './user-notifications.schema';
+export * from './subscriptions.schema';

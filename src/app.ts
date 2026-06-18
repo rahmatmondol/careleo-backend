@@ -22,6 +22,7 @@ import { wooCommerceController } from './modules/integrations/woocommerce/index'
 import { adoptionController, adminAdoptionController } from './modules/adoption/index';
 import { vetsController } from './modules/vets/index';
 import { walkersController } from './modules/walkers/index';
+import { adminSubscriptionsController, subscriptionsController } from './modules/subscriptions/index';
 
 const prefix = process.env.API_PREFIX || '/api/v1';
 
@@ -78,4 +79,6 @@ export const app = new Elysia()
       .use(adminAdoptionController)
       .use(vetsController)
       .use(walkersController)
+      .use(adminSubscriptionsController)
+      .use(subscriptionsController)
   );
