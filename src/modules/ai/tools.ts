@@ -9,8 +9,8 @@ import { RemindersService } from '../reminders/service';
 import { NotificationsService } from '../notifications/service';
 import { CarePlanService } from './care-plan';
 import { AiModel } from './model';
-import { WooCommerceService } from '@/modules/integrations/woocommerce/service';
 import { PetProfileService } from '@/modules/pet-profile/service';
+import { searchShopProducts } from '@/modules/store/shop-client';
 import { can } from '@/modules/subscriptions/entitlements';
 import type { FeatureKey } from '@/modules/subscriptions/catalog';
 
@@ -276,27 +276,15 @@ export async function executeTool(
 
       // ── Store tools ───────────────────────────────────────────────────
       case 'search_products': {
-        const { products } = await WooCommerceService.listCachedProducts();
-        const query = (args.query ?? '').toLowerCase();
-
-        const filtered = (products as any[])
-          .filter((p: any) => {
-            const name = (p.payload?.name ?? '').toLowerCase();
-            const desc = (p.payload?.description ?? '').toLowerCase();
-            const cats = (p.payload?.categories ?? []).map((c: any) => c.name?.toLowerCase() ?? '');
-            const catStr = cats.join(' ');
-            return name.includes(query) || desc.includes(query) || catStr.includes(query);
-          })
-          .slice(0, 5)
-          .map((p: any) => ({
-            id: p.wooProductId,
-            name: p.payload?.name,
-            price: p.payload?.price,
-            image: p.payload?.images?.[0]?.src,
-            url: p.payload?.permalink,
-          }));
-
-        return JSON.stringify({ success: true, products: filtered, query: args.query });
+        const products = await searchShopProducts(String(args.query ?? ''), 5);
+        const mapped = products.map((p) => ({
+          id: p.id,
+          name: p.name,
+          price: p.price,
+          image: p.imageUrl ?? null,
+          url: p.slug ? `/products/${p.slug}` : null,
+        }));
+        return JSON.stringify({ success: true, products: mapped, query: args.query });
       }
 
       // ── Care plan tools ───────────────────────────────────────────────

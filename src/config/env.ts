@@ -27,11 +27,8 @@ const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   GOOGLE_GEMINI_API_KEY: z.string().optional(),
 
-  // WooCommerce Integration
-  WOO_BASE_URL: z.string().url(),
-  WOO_CONSUMER_KEY: z.string().min(1),
-  WOO_CONSUMER_SECRET: z.string().min(1),
-  WOO_WEBHOOK_SECRET: z.string().min(1),
+  // Store service (internal microservice for products/orders)
+  SHOP_SERVICE_URL: z.string().url().default('http://shop-service:3004'),
 
   // File Storage
   AWS_REGION: z.string().default('us-east-1'),

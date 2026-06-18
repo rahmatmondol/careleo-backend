@@ -1,28 +1,4 @@
-import { boolean, index, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
-
-/**
- * Idempotent store of incoming Woo webhook events.
- */
-export const wooWebhookEvents = pgTable(
-  'woo_webhook_events',
-  {
-    id: uuid('id').defaultRandom().primaryKey(),
-    eventType: varchar('event_type', { length: 80 }).notNull(),
-    webhookId: varchar('webhook_id', { length: 120 }),
-    resourceId: integer('resource_id'),
-    deliveryId: varchar('delivery_id', { length: 120 }).notNull(),
-    signature: text('signature'),
-    payload: jsonb('payload').notNull(),
-    processed: boolean('processed').notNull().default(false),
-    processedAt: timestamp('processed_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    index('idx_woo_webhook_delivery_id').on(table.deliveryId),
-    index('idx_woo_webhook_event_type').on(table.eventType),
-  ],
-);
+import { index, jsonb, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 
 /**
  * Generic integration sync job history.

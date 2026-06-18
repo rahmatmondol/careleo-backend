@@ -1,14 +1,3 @@
-export interface WooWebhookEventRow {
-  id: string;
-  eventType: string;
-  resourceId?: string | null;
-  payloadJson: unknown;
-  signatureValid: boolean;
-  processed: boolean;
-  processedAt?: string | null;
-  createdAt: string;
-}
-
 export interface IntegrationSyncJobRow {
   id: string;
   jobName: string;

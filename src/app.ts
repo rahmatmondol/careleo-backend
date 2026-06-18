@@ -18,7 +18,6 @@ import { adminController } from './modules/admin/index';
 import { auditController } from './modules/audit/index';
 import { syncController } from './modules/sync/index';
 import { notificationsController } from './modules/notifications/index';
-import { wooCommerceController } from './modules/integrations/woocommerce/index';
 import { adoptionController, adminAdoptionController } from './modules/adoption/index';
 import { vetsController } from './modules/vets/index';
 import { walkersController } from './modules/walkers/index';
@@ -75,7 +74,6 @@ export const app = new Elysia()
       .use(auditController)
       .use(syncController)
       .use(notificationsController)
-      .use(wooCommerceController)
       .use(adoptionController)
       .use(adminAdoptionController)
       .use(vetsController)

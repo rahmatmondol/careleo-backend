@@ -217,12 +217,12 @@ export const aiChatMessagesTable = pgTable('ai_chat_messages', {
 
 /**
  * FOOD RECOMMENDATIONS TABLE
- * AI-recommended products from WooCommerce store
+ * AI-recommended products from the shop-service store
  */
 export const foodRecommendationsTable = pgTable('food_recommendations', {
   id: uuid('id').primaryKey().defaultRandom(),
   petId: uuid('petId').notNull().references(() => petsTable.id, { onDelete: 'cascade' }),
-  foodId: uuid('foodId').notNull(), // references woo_products.id
+  foodId: uuid('foodId').notNull(), // references a shop-service product id
   
   // Recommendation
   reason: varchar('reason', { length: 200 }),

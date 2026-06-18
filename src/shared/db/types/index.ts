@@ -2,8 +2,5 @@ export * from './users.types';
 export * from './pets.types';
 export * from './tasks.types';
 export * from './ai.types';
-export * from './woo-products.types';
-export * from './woo-orders.types';
-export * from './woo-customers.types';
 export * from './sync.types';
 export * from './audit.types';
