@@ -23,6 +23,7 @@ import { adoptionController, adminAdoptionController } from './modules/adoption/
 import { vetsController } from './modules/vets/index';
 import { walkersController } from './modules/walkers/index';
 import { adminSubscriptionsController, subscriptionsController } from './modules/subscriptions/index';
+import { petProfileController } from './modules/pet-profile/index';
 
 const prefix = process.env.API_PREFIX || '/api/v1';
 
@@ -81,4 +82,5 @@ export const app = new Elysia()
       .use(walkersController)
       .use(adminSubscriptionsController)
       .use(subscriptionsController)
+      .use(petProfileController)
   );

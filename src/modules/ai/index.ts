@@ -41,10 +41,11 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
     .post('/onboarding/generate-questions', async (ctx: any) => {
       const { body, headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
-      const { petType, breed, estimatedAge } = body as {
+      const { petType, breed, estimatedAge, weight } = body as {
         petType: string;
         breed?: string;
         estimatedAge?: string;
+        weight?: string;
       };
 
       if (!petType) {
@@ -56,6 +57,7 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
         petType,
         breed ?? '',
         estimatedAge ?? '',
+        weight ?? '',
       );
       return { success: true, data: result, error: null };
     })

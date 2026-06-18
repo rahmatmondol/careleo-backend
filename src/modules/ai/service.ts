@@ -6,6 +6,9 @@ import { analyzePetImage, type PetVisionResult } from './vision';
 import { CarePlanService } from './care-plan';
 import { AI_TOOL_DECLARATIONS, executeTool } from './tools';
 import { ValidationError } from '@/shared/errors';
+import { PetProfileModel } from '@/modules/pet-profile/model';
+import { PetProfileService } from '@/modules/pet-profile/service';
+import { CORE_PROFILING_QUESTIONS, CORE_QUESTION_IDS } from './profiling-questions';
 import {
   getModelForPurpose,
   checkUserTokenLimit,
@@ -76,10 +79,45 @@ async function buildSystemPrompt(userId: string, petId?: string): Promise<string
     petsBlock = `\nUser's pets:\n${petLines.join('\n')}`;
   }
 
+  // Inject the active pet's structured profile + learned facts so the AI
+  // answers with full memory of this specific pet.
+  let memoryBlock = '';
+  if (petId) {
+    try {
+      const profile = await PetProfileModel.getProfile(petId);
+      const facts = await PetProfileModel.listFacts(petId, { activeOnly: true, limit: 15 });
+      const parts: string[] = [];
+      if (profile) {
+        const fields: [string, unknown][] = [
+          ['Diet brand', profile.dietBrand],
+          ['Diet type', profile.dietType],
+          ['Daily amount', profile.dailyAmount],
+          ['Activity level', profile.activityLevel],
+          ['Allergies', profile.allergies?.length ? profile.allergies.join(', ') : ''],
+          ['Health conditions', profile.healthConditions?.length ? profile.healthConditions.join(', ') : ''],
+          ['Medications', profile.medications?.length ? profile.medications.join(', ') : ''],
+          ['Vaccination', profile.vaccinationStatus],
+          ['Grooming', profile.groomingNotes],
+          ['Behavior', profile.behaviorNotes],
+        ];
+        const filled = fields.filter(([, v]) => v != null && String(v).trim() !== '');
+        if (filled.length) parts.push(filled.map(([k, v]) => `  - ${k}: ${v}`).join('\n'));
+      }
+      if (facts.length) {
+        parts.push('  Known facts:\n' + facts.map((f) => `    • ${f.fact}`).join('\n'));
+      }
+      if (parts.length) {
+        memoryBlock = `\n\n[PET MEMORY — what you already know about this pet; use it, don't re-ask]\n${parts.join('\n')}\n[END PET MEMORY]`;
+      }
+    } catch {
+      // Memory is best-effort context; never block a reply on it.
+    }
+  }
+
   return `You are Careleo AI, a caring and knowledgeable pet care assistant.
 Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
 ${adminBlock}
-${petsBlock}
+${petsBlock}${memoryBlock}
 
 Your personality:
 - Warm, friendly, like a knowledgeable friend — not a cold assistant
@@ -125,6 +163,7 @@ export const AiService = {
     petType: string,
     breed: string,
     estimatedAge: string,
+    weight?: string,
   ) {
     const limitCheck = await checkUserTokenLimit(userId);
     if (!limitCheck.allowed) throw new ValidationError(limitCheck.reason ?? 'Token limit reached');
@@ -139,11 +178,12 @@ Pet details:
 - Type: ${petType}
 - Breed: ${breed || 'Unknown'}
 - Estimated age: ${estimatedAge || 'Unknown'}
+- Weight: ${weight || 'Unknown'}
 
-Generate 6-8 questions that are:
-1. Specific to this pet type and breed
-2. Focused on health, diet, vaccines, allergies, and activity
-3. Written in friendly, conversational tone
+Generate 4-6 questions that are:
+1. Highly SPECIFIC to this species, breed, age, and weight (e.g. breed-typical health risks, weight-appropriate diet, age-stage needs)
+2. NOT about these already-covered basics (do not repeat these — they are asked separately): diet brand, daily food amount, allergies, health conditions, medications, vaccination status, general activity level
+3. Written in a friendly, conversational tone
 
 Return a JSON array with this exact structure:
 [
@@ -161,17 +201,34 @@ Return a JSON array with this exact structure:
 
 Return ONLY valid JSON array. No markdown, no extra text.`;
 
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    const usageMetadata = result.response.usageMetadata;
+    // Hybrid: fixed core questions are always returned (guaranteed coverage).
+    // The AI's breed/species-specific extras are added on top — but if the AI
+    // call fails (quota, network, bad JSON), we still return the core set so
+    // onboarding never breaks.
+    let extras: any[] = [];
+    try {
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      const usageMetadata = result.response.usageMetadata;
 
-    const inputTokens = usageMetadata?.promptTokenCount ?? 300;
-    const outputTokens = usageMetadata?.candidatesTokenCount ?? 500;
+      await recordTokenUsage({
+        userId,
+        model: resolved,
+        feature: 'onboarding',
+        inputTokens: usageMetadata?.promptTokenCount ?? 300,
+        outputTokens: usageMetadata?.candidatesTokenCount ?? 500,
+      });
 
-    await recordTokenUsage({ userId, model: resolved, feature: 'onboarding', inputTokens, outputTokens });
+      const aiQuestions = parseJson(text);
+      extras = Array.isArray(aiQuestions)
+        ? aiQuestions.filter((q: any) => q?.id && !CORE_QUESTION_IDS.includes(q.id))
+        : [];
+    } catch (e: any) {
+      console.warn('[generateOnboardingQuestions] AI generation failed, using core only:', e?.message ?? e);
+    }
 
-    const questions = parseJson(text);
-    return { questions };
+    const questions = [...CORE_PROFILING_QUESTIONS, ...extras];
+    return { questions, aiGenerated: extras.length > 0 };
   },
 
   // ─── Chat Session Management ────────────────────────────────────────────
@@ -406,6 +463,18 @@ Return ONLY valid JSON array. No markdown, no extra text.`;
     // Auto-title session from first message
     if (history.length <= 1) {
       await AiModel.updateSessionTitle(sessionId, userMessage.slice(0, 60));
+    }
+
+    // Background memory enrichment: extract durable pet facts from this
+    // exchange without blocking the reply. Fire-and-forget — never await.
+    if (activePetId && finalText) {
+      void PetProfileService.extractFactsFromMessage({
+        userId,
+        petId: activePetId,
+        sessionId,
+        userText: userMessage,
+        assistantText: finalText,
+      });
     }
 
     return {

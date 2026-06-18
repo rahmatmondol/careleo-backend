@@ -10,6 +10,7 @@ import { NotificationsService } from '../notifications/service';
 import { CarePlanService } from './care-plan';
 import { AiModel } from './model';
 import { WooCommerceService } from '@/modules/integrations/woocommerce/service';
+import { PetProfileService } from '@/modules/pet-profile/service';
 import { can } from '@/modules/subscriptions/entitlements';
 import type { FeatureKey } from '@/modules/subscriptions/catalog';
 
@@ -152,6 +153,23 @@ export const AI_TOOL_DECLARATIONS = [
       required: ['title', 'body'],
     },
   },
+  {
+    name: 'save_pet_fact',
+    description:
+      "Save a durable fact you learned about a pet to its long-term profile (diet, health, allergy, activity, behavior, or preference). Use this when the user shares lasting information about their pet so you remember it later.",
+    parameters: {
+      type: 'object',
+      properties: {
+        petId: { type: 'string', description: 'The pet ID this fact is about' },
+        fact: { type: 'string', description: 'A concise statement of the fact, e.g. "Allergic to chicken"' },
+        category: {
+          type: 'string',
+          description: 'One of: diet, health, activity, behavior, preference, other',
+        },
+      },
+      required: ['petId', 'fact'],
+    },
+  },
 ];
 
 // ─── Tier gating ───────────────────────────────────────────────────────────
@@ -161,6 +179,7 @@ export const AI_TOOL_DECLARATIONS = [
 // "not on your plan" result instead so it can suggest an upgrade.
 const TOOL_REQUIRED_FEATURE: Partial<Record<string, FeatureKey>> = {
   search_products: 'product_recommend',
+  save_pet_fact: 'pet_profiling',
 };
 
 // ─── Tool Executor ─────────────────────────────────────────────────────────
@@ -305,6 +324,21 @@ export async function executeTool(
           { targetMode: 'single' },
         );
         return JSON.stringify({ success: true, message: 'Notification sent' });
+      }
+
+      // ── Pet memory tools ──────────────────────────────────────────────
+      case 'save_pet_fact': {
+        const saved = await PetProfileService.addAiFact(
+          userId,
+          args.petId,
+          args.fact,
+          args.category,
+        );
+        return JSON.stringify({
+          success: true,
+          factId: saved.id,
+          message: `Saved to ${args.petId}'s profile: "${saved.fact}"`,
+        });
       }
 
       default:
