@@ -61,7 +61,7 @@ function parseJson(text: string) {
 }
 
 // ─── Context builder for chat system prompt ───────────────────────────────
-async function buildSystemPrompt(userId: string, petId?: string): Promise<string> {
+export async function buildSystemPrompt(userId: string, petId?: string): Promise<string> {
   const allPets = await AiModel.getUserPets(userId);
   const instructions = await AiModel.getActiveInstructions(userId, petId);
 
@@ -482,6 +482,46 @@ Return ONLY valid JSON array. No markdown, no extra text.`;
       sessionId,
       toolsUsed: toolCallsLog.map((t) => t.tool),
     };
+  },
+
+  // ─── Proactive daily check-in ─────────────────────────────────────────────
+
+  /**
+   * Generate ONE short, warm, AI-written check-in opening about a specific pet,
+   * using its profile + learned facts (Phase 2 memory). Falls back to a simple
+   * pet-name greeting if the model call fails (quota/network) — never throws.
+   */
+  async generateProactiveCheckin(userId: string, petId?: string, petName?: string): Promise<string> {
+    const fallback = petName
+      ? `${petName} আজ কেমন আছে? কিছু জানালে আমি ওর যত্নে সাহায্য করতে পারি।`
+      : `তোমার পোষা প্রাণী আজ কেমন আছে? কিছু জানালে আমি সাহায্য করতে পারি।`;
+    try {
+      const resolved = await getModelForPurpose('general_chat');
+      if (resolved.provider !== 'google' || !resolved.apiKey) return fallback;
+
+      const context = await buildSystemPrompt(userId, petId);
+      const prompt = `${context}
+
+TASK: Write ONE proactive daily check-in opening message to the pet owner, as if you (their AI pet assistant) are reaching out first to see how the pet is doing today. Use what you know about the pet (name, profile, facts) to make it personal and specific. Keep it warm and short (1-2 sentences). Ask an open question that invites them to share an update. Respond in the user's language (Bengali if their data is Bengali). Return ONLY the message text — no quotes, no preamble.`;
+
+      const genAI = new GoogleGenerativeAI(resolved.apiKey);
+      const model = genAI.getGenerativeModel({ model: resolved.modelName });
+      const result = await model.generateContent(prompt);
+      const text = (result.response.text() ?? '').trim();
+      const usage = result.response.usageMetadata;
+      await recordTokenUsage({
+        userId,
+        petId,
+        model: resolved,
+        feature: 'proactive_checkin',
+        inputTokens: usage?.promptTokenCount ?? 200,
+        outputTokens: usage?.candidatesTokenCount ?? 60,
+      });
+      return text || fallback;
+    } catch (e: any) {
+      console.warn('[generateProactiveCheckin] failed, using fallback:', e?.message ?? e);
+      return fallback;
+    }
   },
 
   // ─── Care Plan ──────────────────────────────────────────────────────────
