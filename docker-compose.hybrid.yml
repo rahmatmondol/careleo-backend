@@ -81,6 +81,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_GEMINI_API_KEY: ${GOOGLE_GEMINI_API_KEY:-}
       SHOP_SERVICE_URL: http://shop-service:3004
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
     ports:
       - "3000:3000"
     depends_on:
@@ -98,6 +99,7 @@ services:
       PORT: "3004"
       DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_shop
       JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
     ports:
       - "3004:3004"
     depends_on:

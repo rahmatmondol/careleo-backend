@@ -20,22 +20,37 @@ export async function removeCartItem(itemId: string){
   await db.delete(cartItems).where(eq(cartItems.id, itemId));
   return { message: 'Item removed from cart' };
 }
+/**
+ * Create an order for a user from explicit line items: price lookup, stock
+ * deduction, inventory log, order + order items. Shared by cart checkout and
+ * the internal service-order endpoint (background re-orders).
+ */
+export async function createOrderForUser(userId: string, items: { productId: string; quantity: number }[]){
+  if (!items?.length) return { error: 'No items' };
+  let total = 0; const orderItemsData: any[] = [];
+  for (const item of items){
+    const rows = await db.select().from(products).where(eq(products.id, item.productId));
+    const prod = rows[0];
+    if (prod){
+      const qty = Number(item.quantity || 0);
+      const price = Number(prod.price); total += price * qty;
+      orderItemsData.push({ productId: prod.id, productName: prod.name, quantity: qty, price: String(price) });
+      const newStock = Math.max(0, Number(prod.stock || 0) - qty);
+      await db.update(products).set({ stock: newStock }).where(eq(products.id, prod.id));
+      await db.insert(productInventoryLogs).values({ productId: prod.id, type: 'Sale', quantity: -qty, note: 'Stock deducted from order', actor: 'System' });
+    }
+  }
+  if (!orderItemsData.length) return { error: 'No valid products' };
+  const order = await db.insert(orders).values({ userId, totalAmount: String(total) }).returning();
+  for (const oi of orderItemsData) await db.insert(orderItems).values({ orderId: order[0]!.id, ...oi });
+  return { message: 'Order placed', order: order[0] };
+}
+
 export async function checkout(userId: string){
   const items = await db.select().from(cartItems).where(eq(cartItems.userId, userId));
   if (!items.length) return { error: 'Cart is empty' };
-  let total = 0; const orderItemsData: any[] = [];
-  for (const item of items){
-    const prod = await db.select().from(products).where(eq(products.id, item.productId));
-    if (prod.length){
-      const price = Number(prod[0].price); total += price * item.quantity;
-      orderItemsData.push({ productId: prod[0].id, productName: prod[0].name, quantity: item.quantity, price: String(price) });
-      const newStock = Math.max(0, Number(prod[0].stock || 0) - Number(item.quantity || 0));
-      await db.update(products).set({ stock: newStock }).where(eq(products.id, prod[0].id));
-      await db.insert(productInventoryLogs).values({ productId: prod[0].id, type: 'Sale', quantity: -Number(item.quantity || 0), note: 'Stock deducted from checkout', actor: 'System' });
-    }
-  }
-  const order = await db.insert(orders).values({ userId, totalAmount: String(total) }).returning();
-  for (const oi of orderItemsData) await db.insert(orderItems).values({ orderId: order[0].id, ...oi });
+  const result = await createOrderForUser(userId, items.map((i) => ({ productId: i.productId, quantity: i.quantity })));
+  if ((result as any).error) return result;
   await db.delete(cartItems).where(eq(cartItems.userId, userId));
-  return { message: 'Order placed', order: order[0] };
+  return result;
 }

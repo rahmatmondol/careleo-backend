@@ -11,6 +11,7 @@ import { CarePlanService } from './care-plan';
 import { AiModel } from './model';
 import { PetProfileService } from '@/modules/pet-profile/service';
 import { searchShopProducts } from '@/modules/store/shop-client';
+import { FoodInventoryService } from '@/modules/food-inventory/service';
 import { can } from '@/modules/subscriptions/entitlements';
 import type { FeatureKey } from '@/modules/subscriptions/catalog';
 
@@ -170,6 +171,46 @@ export const AI_TOOL_DECLARATIONS = [
       required: ['petId', 'fact'],
     },
   },
+  {
+    name: 'check_inventory',
+    description: "Check a pet's food inventory and how many days of food remain. Use when the user asks about food stock or before suggesting a re-order.",
+    parameters: {
+      type: 'object',
+      properties: {
+        petId: { type: 'string', description: 'The pet ID' },
+      },
+      required: ['petId'],
+    },
+  },
+  {
+    name: 'update_food_inventory',
+    description: "Set or update a pet's food inventory: which product, how much is on hand, and daily consumption. Use when the user tells you what/how much their pet eats or how much food is left.",
+    parameters: {
+      type: 'object',
+      properties: {
+        petId: { type: 'string', description: 'The pet ID' },
+        inventoryId: { type: 'string', description: 'Existing inventory item id to update (omit to create new)' },
+        productId: { type: 'string', description: 'Shop product id for the food (optional)' },
+        productName: { type: 'string', description: 'Food product name' },
+        quantityUnits: { type: 'number', description: 'Units of food currently on hand (e.g. grams)' },
+        dailyConsumption: { type: 'number', description: 'Units consumed per day' },
+        lowStockThresholdDays: { type: 'number', description: 'Alert when this many days of food remain (default 3)' },
+      },
+      required: ['petId'],
+    },
+  },
+  {
+    name: 'place_reorder',
+    description: "Re-order more food for a pet's inventory item. For Standard users this creates a pending order the user confirms; for Premium (auto re-order) it is placed automatically. Always confirm with the user before calling unless they have auto re-order.",
+    parameters: {
+      type: 'object',
+      properties: {
+        inventoryId: { type: 'string', description: 'The food inventory item id to re-order' },
+        quantity: { type: 'number', description: 'How many units/packs to order (default 1)' },
+      },
+      required: ['inventoryId'],
+    },
+  },
 ];
 
 // ─── Tier gating ───────────────────────────────────────────────────────────
@@ -180,6 +221,9 @@ export const AI_TOOL_DECLARATIONS = [
 const TOOL_REQUIRED_FEATURE: Partial<Record<string, FeatureKey>> = {
   search_products: 'product_recommend',
   save_pet_fact: 'pet_profiling',
+  check_inventory: 'food_inventory',
+  update_food_inventory: 'food_inventory',
+  place_reorder: 'assisted_reorder',
 };
 
 // ─── Tool Executor ─────────────────────────────────────────────────────────
@@ -189,6 +233,7 @@ export async function executeTool(
   toolName: string,
   args: Record<string, any>,
   userId: string,
+  authToken?: string,
 ): Promise<string> {
   try {
     // Tier gate: block tools whose feature is not on the user's plan.
@@ -326,6 +371,55 @@ export async function executeTool(
           success: true,
           factId: saved.id,
           message: `Saved to ${args.petId}'s profile: "${saved.fact}"`,
+        });
+      }
+
+      // ── Food inventory + re-order tools ───────────────────────────────
+      case 'check_inventory': {
+        const items = await FoodInventoryService.getInventory(userId, args.petId);
+        return JSON.stringify({
+          success: true,
+          inventory: items.map((it) => ({
+            inventoryId: it.id,
+            product: it.productName,
+            quantityUnits: it.quantityUnits,
+            dailyConsumption: it.dailyConsumption,
+            daysRemaining: it.daysRemaining === Infinity ? null : Math.round(it.daysRemaining * 10) / 10,
+          })),
+        });
+      }
+
+      case 'update_food_inventory': {
+        const updated = await FoodInventoryService.updateInventory(userId, args.petId, {
+          inventoryId: args.inventoryId,
+          productId: args.productId,
+          productName: args.productName,
+          quantityUnits: args.quantityUnits,
+          dailyConsumption: args.dailyConsumption,
+          lowStockThresholdDays: args.lowStockThresholdDays,
+        });
+        return JSON.stringify({ success: true, inventoryId: updated?.id, message: 'Inventory updated' });
+      }
+
+      case 'place_reorder': {
+        const reorder = await FoodInventoryService.requestReorder(userId, args.inventoryId, args.quantity ?? 1);
+        if (reorder.status === 'pending_confirm' && authToken) {
+          const placed = await FoodInventoryService.confirmReorder(userId, reorder.id, authToken);
+          return JSON.stringify({
+            success: placed.status === 'placed',
+            reorderId: placed.id,
+            status: placed.status,
+            shopOrderId: placed.shopOrderId,
+            message: placed.status === 'placed' ? 'Re-order placed' : 'Re-order could not be completed',
+          });
+        }
+        return JSON.stringify({
+          success: reorder.status === 'auto_placed' || reorder.status === 'pending_confirm',
+          reorderId: reorder.id,
+          status: reorder.status,
+          shopOrderId: reorder.shopOrderId,
+          message:
+            reorder.status === 'auto_placed' ? 'Auto re-order placed' : 'Re-order created; confirm to place it',
         });
       }
 

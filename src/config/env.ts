@@ -29,6 +29,7 @@ const EnvSchema = z.object({
 
   // Store service (internal microservice for products/orders)
   SHOP_SERVICE_URL: z.string().url().default('http://shop-service:3004'),
+  INTERNAL_SERVICE_SECRET: z.string().default('dev_internal_service_secret_change_me'),
 
   // File Storage
   AWS_REGION: z.string().default('us-east-1'),

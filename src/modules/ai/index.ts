@@ -107,6 +107,7 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
         params.sessionId,
         message.trim(),
         petId,
+        headers.authorization?.startsWith('Bearer ') ? headers.authorization.slice(7) : undefined,
       );
       return { success: true, data: result, error: null };
     })

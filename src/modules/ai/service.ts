@@ -262,6 +262,7 @@ Return ONLY valid JSON array. No markdown, no extra text.`;
     sessionId: string,
     userMessage: string,
     petId?: string,
+    authToken?: string,
   ) {
     // Check user token limit first
     const limitCheck = await checkUserTokenLimit(userId);
@@ -348,7 +349,7 @@ Return ONLY valid JSON array. No markdown, no extra text.`;
         for (const tc of msg.tool_calls) {
           if (tc.type !== 'function') continue;
           const args = JSON.parse(tc.function.arguments ?? '{}');
-          const toolResult = await executeTool(tc.function.name, args, userId);
+          const toolResult = await executeTool(tc.function.name, args, userId, authToken);
           toolCallsLog.push({ tool: tc.function.name, args, result: toolResult });
           messages.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(toolResult) });
         }
@@ -395,7 +396,7 @@ Return ONLY valid JSON array. No markdown, no extra text.`;
         anthropicMsgs.push({ role: 'assistant', content: res.content });
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
         for (const tu of toolUseBlocks) {
-          const toolResult = await executeTool(tu.name, tu.input as Record<string, any>, userId);
+          const toolResult = await executeTool(tu.name, tu.input as Record<string, any>, userId, authToken);
           toolCallsLog.push({ tool: tu.name, args: tu.input, result: toolResult });
           toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(toolResult) });
         }
@@ -427,7 +428,7 @@ Return ONLY valid JSON array. No markdown, no extra text.`;
         for (const part of functionCalls) {
           const fc = part.functionCall;
           if (!fc) continue;
-          const toolResult = await executeTool(fc.name, (fc.args as Record<string, any>) ?? {}, userId);
+          const toolResult = await executeTool(fc.name, (fc.args as Record<string, any>) ?? {}, userId, authToken);
           toolCallsLog.push({ tool: fc.name, args: fc.args, result: toolResult });
           toolResults.push({ functionResponse: { name: fc.name, response: { result: toolResult } } });
         }

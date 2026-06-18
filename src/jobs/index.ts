@@ -7,14 +7,17 @@
 import { runTaskCheckerJob } from './task-checker.job';
 import { runAiNudgeJob } from './ai-nudge.job';
 import { runDailyCheckinJob } from './daily-checkin.job';
+import { runLowStockJob } from './low-stock.job';
 
 const TASK_CHECKER_INTERVAL_MS = 30 * 60 * 1000;  // 30 minutes
 const AI_NUDGE_INTERVAL_MS     = 2 * 60 * 60 * 1000; // 2 hours
 const DAILY_CHECKIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const LOW_STOCK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 let taskCheckerTimer: ReturnType<typeof setInterval> | null = null;
 let aiNudgeTimer: ReturnType<typeof setInterval> | null = null;
 let dailyCheckinTimer: ReturnType<typeof setInterval> | null = null;
+let lowStockTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startJobs() {
   console.log('[Jobs] Starting background jobs...');
@@ -59,6 +62,18 @@ export function startJobs() {
     }
   }, DAILY_CHECKIN_INTERVAL_MS);
 
+  // Low-stock alert: hourly tick (no immediate startup run).
+  lowStockTimer = setInterval(async () => {
+    try {
+      const result = await runLowStockJob();
+      if (result.alerted > 0 || result.autoOrdered > 0) {
+        console.log(`[Jobs] low-stock: ${result.alerted} alerts, ${result.autoOrdered} auto-orders`);
+      }
+    } catch (err) {
+      console.error('[Jobs] low-stock error:', err);
+    }
+  }, LOW_STOCK_INTERVAL_MS);
+
   console.log('[Jobs] All background jobs started.');
 }
 
@@ -66,6 +81,7 @@ export function stopJobs() {
   if (taskCheckerTimer) clearInterval(taskCheckerTimer);
   if (aiNudgeTimer) clearInterval(aiNudgeTimer);
   if (dailyCheckinTimer) clearInterval(dailyCheckinTimer);
+  if (lowStockTimer) clearInterval(lowStockTimer);
   console.log('[Jobs] Background jobs stopped.');
 }
 

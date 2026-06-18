@@ -12,3 +12,4 @@ export * from './task-reminder-logs.schema';
 export * from './user-notifications.schema';
 export * from './subscriptions.schema';
 export * from './pet-profiles.schema';
+export * from './food-inventory.schema';

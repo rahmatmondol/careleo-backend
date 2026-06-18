@@ -4,6 +4,7 @@ import { auth } from './middleware/auth';
 import { publicRoutes } from './routes/public.routes';
 import { adminRoutes } from './routes/admin.routes';
 import { customerRoutes } from './routes/customer.routes';
+import { internalRoutes } from './routes/internal.routes';
 
 const PORT = Number(Bun.env.PORT) || 3004;
 
@@ -11,6 +12,7 @@ const app = new Elysia()
   .use(cors())
   .use(auth)
   .use(publicRoutes)
+  .use(internalRoutes)
   .use(adminRoutes)
   .use(customerRoutes)
   .get('/health', () => ({ status: 'ok', service: 'shop-service' }))
