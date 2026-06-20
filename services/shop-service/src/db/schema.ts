@@ -164,6 +164,12 @@ export const orders = pgTable('orders', {
   totalAmount: decimal('total_amount', { precision: 10, scale: 2 }).notNull(),
   status: varchar('status', { length: 50 }).default('PENDING').notNull(),
   shippingAddress: varchar('shipping_address', { length: 500 }),
+  // Payment. Cash-on-delivery is the launch default; online providers
+  // (bKash/SSLCommerz/Stripe) plug in by setting paymentMethod + paymentStatus.
+  paymentMethod: varchar('payment_method', { length: 30 }).default('COD').notNull(),
+  paymentStatus: varchar('payment_status', { length: 30 }).default('PENDING').notNull(),
+  // Origin of the order: 'checkout' (user), 'subscription' (recurring), 'auto_reorder' (AI).
+  source: varchar('source', { length: 30 }).default('checkout').notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
@@ -180,8 +186,10 @@ export const productSubscriptions = pgTable('product_subscriptions', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id').notNull(),
   productId: uuid('product_id').notNull(),
+  quantity: integer('quantity').default(1).notNull(),
   frequencyDays: integer('frequency_days').notNull(),
   nextOrderDate: date('next_order_date'),
+  lastOrderedAt: timestamp('last_ordered_at'),
   isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

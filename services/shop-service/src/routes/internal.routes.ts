@@ -22,7 +22,7 @@ export const internalRoutes = new Elysia().post(
       set.status = 400;
       return { error: 'userId and items[] are required' };
     }
-    const result = await createOrderForUser(b.userId, b.items);
+    const result = await createOrderForUser(b.userId, b.items, { source: 'auto_reorder' });
     if ((result as any).error) {
       set.status = 400;
       return result;

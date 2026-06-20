@@ -1,51 +1,46 @@
+// =====================================
+// JWT Auth Middleware (Video Service)
+// =====================================
+
 import { jwt } from '@elysiajs/jwt';
-import { jwtVerify } from 'jose';
+import { Elysia } from 'elysia';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod'
-);
-
-export interface AuthUser {
-  id: string;
-  role: string;
+if (!process.env.JWT_SECRET) {
+  console.warn('⚠️  [video-service] JWT_SECRET is not set — using an insecure fallback. Set JWT_SECRET in production.');
 }
 
-async function verifyToken(token: string): Promise<AuthUser | null> {
-  try {
-    const { payload } = await jwtVerify(token, JWT_SECRET);
-    if (payload && typeof payload.sub === 'string') {
-      return { id: payload.sub, role: (payload.role as string) || 'USER' };
+export const jwtPlugin = jwt({ name: 'jwt', secret: process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod' });
+
+export const authGuard = new Elysia()
+  .use(jwtPlugin)
+  // `as: 'global'` so the derived `user` propagates into sibling route plugins.
+  // With default (local) scope, route modules used after this one see `user`
+  // as undefined and every beforeHandle guard would 401.
+  .derive({ as: 'global' }, async ({ jwt, headers: { authorization } }) => {
+    let user: { id: string; role: string } | null = null;
+    if (authorization?.startsWith('Bearer ')) {
+      try {
+        const payload = await jwt.verify(authorization.slice(7));
+        if (payload && typeof payload.sub === 'string') user = { id: payload.sub, role: (payload.role as string) || 'USER' };
+      } catch {}
     }
-  } catch {
-    // invalid token
+    return { user };
+  });
+
+/**
+ * beforeHandle guard for admin-only routes. video-service has no full RBAC
+ * table (unlike the monolith); a coarse role check is enough for moderation.
+ * Roles are lowercase snake_case on the backend (see CLAUDE.md).
+ */
+export const ADMIN_ROLES = ['admin', 'super_admin', 'support'];
+
+export const requireAdmin = ({ user, set }: any) => {
+  if (!user) {
+    set.status = 401;
+    return { error: 'Unauthorized' };
   }
-  return null;
-}
-
-export const authPlugin = (app: any) =>
-  app
-    .use(
-      jwt({
-        name: 'jwt',
-        secret: process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod',
-      })
-    )
-    .derive(async ({ headers: { authorization } }: any) => {
-      let user: AuthUser | null = null;
-      let token = '';
-      if (authorization?.startsWith('Bearer ')) {
-        token = authorization.slice(7);
-        user = await verifyToken(token);
-      }
-      return { user, token };
-    })
-    .guard({
-      beforeHandle({ user, set }: any) {
-        if (!user) {
-          set.status = 401;
-          return { error: 'Unauthorized' };
-        }
-      },
-    });
-
-export { verifyToken, JWT_SECRET };
+  if (!ADMIN_ROLES.includes(String(user.role || '').toLowerCase())) {
+    set.status = 403;
+    return { error: 'Forbidden' };
+  }
+};

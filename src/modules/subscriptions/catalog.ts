@@ -22,6 +22,7 @@ export const FEATURE_KEYS = [
   'monthly_food_supply',  // Monthly food supply included
   'auto_reorder',         // Auto food re-order (no manual confirm)
   'freelancer_hiring',    // Hire walker / care freelancers
+  'auto_hire',            // AI auto-hire (no manual confirm, Premium)
   'vet_booking',          // Vet appointment booking
   'vaccination_mgmt',     // Vaccination management
   'health_records',       // Health records + follow-up
@@ -54,6 +55,7 @@ export const FEATURE_CATALOG: { key: FeatureKey; label: string; group: string }[
   { key: 'monthly_food_supply', label: 'Monthly food supply',           group: 'Food' },
   { key: 'auto_reorder',        label: 'Auto food re-order',            group: 'Food' },
   { key: 'freelancer_hiring',   label: 'Freelancer hiring (walker/care)', group: 'Care' },
+  { key: 'auto_hire',           label: 'AI auto-hire freelancer (Premium)', group: 'Care' },
   { key: 'vet_booking',         label: 'Vet appointment booking',       group: 'Health' },
   { key: 'vaccination_mgmt',    label: 'Vaccination management',        group: 'Health' },
   { key: 'health_records',      label: 'Health records + follow-up',    group: 'Health' },
@@ -128,6 +130,7 @@ export const DEFAULT_PLANS: {
       monthly_food_supply: true,
       auto_reorder: true,
       freelancer_hiring: true,
+      auto_hire: true,
       vet_booking: true,
       vaccination_mgmt: true,
       health_records: true,

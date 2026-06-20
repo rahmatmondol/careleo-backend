@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { db } from '../../db';
 import { orders, orderItems } from '../../db/schema';
 
@@ -7,9 +7,9 @@ export async function listOrders(userId: string) {
   return { orders: result };
 }
 
-export async function getOrderById(id: string) {
-  const order = await db.select().from(orders).where(eq(orders.id, id));
-  if (!order.length) return { error: 'Order not found' };
-  const items = await db.select().from(orderItems).where(eq(orderItems.orderId, id));
+export async function getOrderById(userId: string, id: string) {
+  const order = await db.select().from(orders).where(and(eq(orders.id, id), eq(orders.userId, userId)));
+  if (!order.length) return { error: 'Order not found', status: 404 };
+  const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order[0]!.id));
   return { order: order[0], items };
 }

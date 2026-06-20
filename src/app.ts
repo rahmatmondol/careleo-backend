@@ -24,6 +24,7 @@ import { walkersController } from './modules/walkers/index';
 import { adminSubscriptionsController, subscriptionsController } from './modules/subscriptions/index';
 import { petProfileController } from './modules/pet-profile/index';
 import { foodInventoryController } from './modules/food-inventory/index';
+import { vaccinationsController } from './modules/vaccinations/index';
 
 const prefix = process.env.API_PREFIX || '/api/v1';
 
@@ -83,4 +84,5 @@ export const app = new Elysia()
       .use(subscriptionsController)
       .use(petProfileController)
       .use(foodInventoryController)
+      .use(vaccinationsController)
   );

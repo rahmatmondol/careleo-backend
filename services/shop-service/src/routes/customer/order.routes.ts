@@ -3,4 +3,4 @@ import { getOrderByIdController, listOrdersController } from '../../controllers/
 
 export const orderRoutes = new Elysia()
   .get('/api/v1/shop/orders', ({ user }) => listOrdersController(user))
-  .get('/api/v1/shop/orders/:id', ({ params }) => getOrderByIdController(params));
+  .get('/api/v1/shop/orders/:id', ({ user, params }) => getOrderByIdController(user, params));

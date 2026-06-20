@@ -91,6 +91,7 @@ export const vetAppointments = pgTable(
     reason: text('reason'),
     notes: text('notes'),
     callToken: text('call_token'),
+    followUpAt: varchar('follow_up_at', { length: 40 }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

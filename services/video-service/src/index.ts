@@ -1,33 +1,29 @@
-import { Elysia } from 'elysia';
-import { authPlugin } from './middleware/auth';
-import { consultationRoutes } from './routes/consultations.routes';
-import { cameraRoutes } from './routes/cameras.routes';
-import { sessionRoutes } from './routes/sessions.routes';
+// =====================================
+// Video Service — Entry Point
+// =====================================
 
-const app = new Elysia()
-  // Health check (no auth)
+import { Elysia } from 'elysia';
+import { cors } from '@elysiajs/cors';
+import { authGuard } from './middleware/auth';
+import { adminController } from './modules/admin';
+import { consultationsController } from './modules/consultations';
+import { camerasController } from './modules/cameras';
+import { sessionsController } from './modules/sessions';
+
+export const app = new Elysia()
+  .use(cors())
+  .use(authGuard)
+  .use(adminController)
+  .use(consultationsController)
+  .use(camerasController)
+  .use(sessionsController)
   .get('/health', () => ({
     status: 'ok',
     service: 'video-service',
     timestamp: new Date().toISOString(),
-  }))
-
-  // Protected video routes
-  .group('/api/v1/video', (group) =>
-    group
-      .use(authPlugin)
-      .use(consultationRoutes)
-      .use(cameraRoutes)
-      .use(sessionRoutes)
-  );
+  }));
 
 if (import.meta.main) {
-  const PORT = parseInt(process.env.PORT || '3014');
-  app.listen(PORT, () => {
-    console.log(`🎥 Pawly Video Service running on port ${PORT}`);
-    console.log(`   Health: http://localhost:${PORT}/health`);
-    console.log(`   API:    http://localhost:${PORT}/api/v1/video`);
-  });
+  const port = Number(process.env.PORT) || 3014;
+  app.listen(port, () => console.log(`🎥 Video Service running at :${port}`));
 }
-
-export { app };

@@ -5,20 +5,32 @@
 import { Elysia } from 'elysia';
 import { cors } from '@elysiajs/cors';
 import { authGuard } from './middleware/auth';
-import { feedRoutes } from './routes/feed.routes';
-import { postsRoutes } from './routes/posts.routes';
-import { commentsRoutes } from './routes/comments.routes';
-import { likesRoutes } from './routes/likes.routes';
-import { socialActionsRoutes } from './routes/social-actions.routes';
+import { feedController } from './modules/feed';
+import { postsController } from './modules/posts';
+import { commentsController } from './modules/comments';
+import { likesController } from './modules/likes';
+import { followsController } from './modules/follows';
+import { sharesController } from './modules/shares';
+import { notificationsController } from './modules/notifications';
+import { bookmarksController } from './modules/bookmarks';
+import { storiesController } from './modules/stories';
+import { reportsController } from './modules/reports';
+import { adminController } from './modules/admin';
 
 export const app = new Elysia()
   .use(cors())
   .use(authGuard)
-  .use(feedRoutes)
-  .use(postsRoutes)
-  .use(commentsRoutes)
-  .use(likesRoutes)
-  .use(socialActionsRoutes)
+  .use(feedController)
+  .use(postsController)
+  .use(commentsController)
+  .use(likesController)
+  .use(followsController)
+  .use(sharesController)
+  .use(notificationsController)
+  .use(bookmarksController)
+  .use(storiesController)
+  .use(reportsController)
+  .use(adminController)
   .get('/health', () => ({
     status: 'ok',
     service: 'social-service',

@@ -1,4 +1,4 @@
-import { and, desc, eq, like, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { categories, products } from '../db/schema';
 
@@ -10,7 +10,7 @@ export async function listCategories() {
 export async function listProducts(query: any) {
   const conditions = [eq(products.isActive, true)] as any[];
   if (query.categoryId) conditions.push(eq(products.categoryId, query.categoryId));
-  if (query.search) conditions.push(like(products.name, `%${query.search}%`));
+  if (query.search) conditions.push(ilike(products.name, `%${query.search}%`));
 
   const page = Number(query.page) || 1;
   const limit = Number(query.limit) || 20;
@@ -30,6 +30,6 @@ export async function listProducts(query: any) {
 }
 
 export async function getProductById(id: string) {
-  const result = await db.select().from(products).where(eq(products.id, id));
+  const result = await db.select().from(products).where(and(eq(products.id, id), eq(products.isActive, true)));
   return result[0] || null;
 }

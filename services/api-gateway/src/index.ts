@@ -7,6 +7,7 @@ import { shopRoutes } from './routes/shop.routes';
 import { socialRoutes } from './routes/social.routes';
 import { videoRoutes } from './routes/video.routes';
 import { mediaRoutes } from './routes/media.routes';
+import { freelancerRoutes } from './routes/freelancer.routes';
 import { careleoRoutes } from './routes/careleo.routes';
 
 const PORT = Number(Bun.env.PORT) || 3000;
@@ -40,10 +41,11 @@ const app = new Elysia()
   .use(healthRoutes)
 
   // --- Standalone microservices (specific prefixes first) ---
-  .use(shopRoutes)    // /api/v1/shop/*   -> shop-service
-  .use(socialRoutes)  // /api/v1/social/* -> social-service
-  .use(videoRoutes)   // /api/v1/video/*  -> video-service
-  .use(mediaRoutes)   // /api/v1/media/*  -> media-service
+  .use(shopRoutes)        // /api/v1/shop/*        -> shop-service
+  .use(socialRoutes)      // /api/v1/social/*      -> social-service
+  .use(videoRoutes)       // /api/v1/video/*       -> video-service
+  .use(mediaRoutes)       // /api/v1/media/*       -> media-service
+  .use(freelancerRoutes)  // /api/v1/freelancer/*  -> freelancer-service
 
   // --- Everything else -> careleo-backend (catch-all, registered last) ---
   .use(careleoRoutes) // /api/v1/*        -> careleo-backend
@@ -52,10 +54,11 @@ const app = new Elysia()
 
 console.log(`🚪 CareLeo API Gateway running at http://localhost:${PORT}`);
 console.log(`📖 Swagger docs at http://localhost:${PORT}/docs`);
-console.log(`   /api/v1/shop/*   -> ${Bun.env.SHOP_SERVICE_URL || 'http://localhost:3004'}`);
-console.log(`   /api/v1/social/* -> ${Bun.env.SOCIAL_SERVICE_URL || 'http://localhost:3008'}`);
-console.log(`   /api/v1/video/*  -> ${Bun.env.VIDEO_SERVICE_URL || 'http://localhost:3014'}`);
-console.log(`   /api/v1/media/*  -> ${Bun.env.MEDIA_SERVICE_URL || 'http://localhost:3017'}`);
-console.log(`   /api/v1/*        -> ${Bun.env.CARELEO_SERVICE_URL || 'http://localhost:3000'}`);
+console.log(`   /api/v1/shop/*        -> ${Bun.env.SHOP_SERVICE_URL || 'http://localhost:3004'}`);
+console.log(`   /api/v1/social/*      -> ${Bun.env.SOCIAL_SERVICE_URL || 'http://localhost:3008'}`);
+console.log(`   /api/v1/video/*       -> ${Bun.env.VIDEO_SERVICE_URL || 'http://localhost:3014'}`);
+console.log(`   /api/v1/media/*       -> ${Bun.env.MEDIA_SERVICE_URL || 'http://localhost:3017'}`);
+console.log(`   /api/v1/freelancer/*  -> ${Bun.env.FREELANCER_SERVICE_URL || 'http://localhost:3020'}`);
+console.log(`   /api/v1/*             -> ${Bun.env.CARELEO_SERVICE_URL || 'http://localhost:3000'}`);
 
 export { app };

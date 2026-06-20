@@ -7,6 +7,7 @@ export * from './sync.schema';
 export * from './audit.schema';
 export * from './adoption.schema';
 export * from './vets.schema';
+export * from './vaccinations.schema';
 export * from './walkers.schema';
 export * from './task-reminder-logs.schema';
 export * from './user-notifications.schema';
