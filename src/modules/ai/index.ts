@@ -1,6 +1,7 @@
 import { Elysia } from 'elysia';
 import { requireAuth } from '@/shared/auth/guards';
 import { AiService } from './service';
+import { assessSymptoms } from './symptom-assessment';
 
 export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (app) =>
   app
@@ -128,5 +129,24 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
     })
 
     // ─── Legacy ────────────────────────────────────────────────────────
-    .post('/detect-breed', async () => ({ success: true, data: null, error: null })),
+    .post('/detect-breed', async () => ({ success: true, data: null, error: null }))
+
+    // ─── Symptom check ─────────────────────────────────────────────────
+    .post('/symptom-check', async (ctx: any) => {
+      const { body, headers, jwt } = ctx;
+      try {
+        const user = await requireAuth(headers, jwt);
+        const { symptoms, petId } = body as { symptoms: string[]; petId?: string };
+        if (!symptoms || !Array.isArray(symptoms) || symptoms.length === 0) {
+          return { success: false, error: 'symptoms array is required', data: null };
+        }
+        const assessment = await assessSymptoms(user.id, petId, symptoms);
+        return { success: true, data: assessment, error: null };
+      } catch (err: any) {
+        return new Response(
+          JSON.stringify({ success: false, data: null, error: err?.message ?? 'Assessment failed' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+    }),
 );

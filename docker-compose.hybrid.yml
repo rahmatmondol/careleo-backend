@@ -86,6 +86,9 @@ services:
       SHOP_SERVICE_URL: http://shop-service:3004
       INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
       FREELANCER_SERVICE_URL: http://freelancer-service:3020
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
     ports:
       - "3000:3000"
     depends_on:
