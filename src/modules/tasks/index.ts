@@ -8,7 +8,7 @@ export const tasksController = new Elysia({ name: 'tasks-controller' }).group('/
     .get('', async (ctx: any) => {
       const { headers, jwt } = ctx;
       const authUser = await requireAuth(headers, jwt);
-      return TasksService.list(authUser.id);
+      return TasksService.list(authUser.id, (ctx.query as any)?.petId ?? undefined);
     })
     /** Create task. */
     .post('', async (ctx: any) => {

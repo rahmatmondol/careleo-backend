@@ -25,6 +25,7 @@ import { adminSubscriptionsController, subscriptionsController } from './modules
 import { petProfileController } from './modules/pet-profile/index';
 import { foodInventoryController } from './modules/food-inventory/index';
 import { vaccinationsController } from './modules/vaccinations/index';
+import { storeController } from './modules/store/index';
 
 const prefix = process.env.API_PREFIX || '/api/v1';
 
@@ -85,4 +86,5 @@ export const app = new Elysia()
       .use(petProfileController)
       .use(foodInventoryController)
       .use(vaccinationsController)
+      .use(storeController)
   );

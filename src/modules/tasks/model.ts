@@ -27,8 +27,10 @@ export const TasksModel = {
     return rows[0] ?? null;
   },
 
-  /** List tasks for authenticated user with pet name. */
-  async listTasks(userId: string) {
+  /** List tasks for authenticated user with pet name. Optionally filter by pet. */
+  async listTasks(userId: string, petId?: string) {
+    const conditions = [eq(tasks.userId, userId)];
+    if (petId) conditions.push(eq(tasks.petId, petId));
     return db
       .select({
         id: tasks.id,
@@ -46,7 +48,7 @@ export const TasksModel = {
       })
       .from(tasks)
       .innerJoin(pets, eq(tasks.petId, pets.id))
-      .where(eq(tasks.userId, userId))
+      .where(and(...conditions))
       .orderBy(desc(tasks.dueDate), desc(tasks.createdAt));
   },
 

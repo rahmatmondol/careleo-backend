@@ -45,8 +45,8 @@ export const TasksService = {
   },
 
   /** List user tasks. */
-  async list(userId: string) {
-    const rows = await TasksModel.listTasks(userId);
+  async list(userId: string, petId?: string) {
+    const rows = await TasksModel.listTasks(userId, petId);
     return { tasks: rows };
   },
 
