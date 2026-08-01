@@ -1,5 +1,20 @@
 import { safeJsonParse } from './common';
 
+/** Below this (and above 0) a product is reported as "Low Stock". */
+export const LOW_STOCK_THRESHOLD = 10;
+
+/**
+ * Inventory availability, derived from `stock`.
+ * Kept separate from `status`, which is the *publish* state (Draft/Published/...)
+ * stored on the row and edited from the product form.
+ */
+export const deriveStockStatus = (stock: any): 'In Stock' | 'Low Stock' | 'Out of Stock' => {
+  const qty = Number(stock || 0);
+  if (qty <= 0) return 'Out of Stock';
+  if (qty <= LOW_STOCK_THRESHOLD) return 'Low Stock';
+  return 'In Stock';
+};
+
 export const mapProductForAdmin = (p: any) => ({
   id: p.id,
   name: p.name,
@@ -10,7 +25,8 @@ export const mapProductForAdmin = (p: any) => ({
   price: Number(p.price || 0),
   costPrice: Number((p as any).costPrice || 0),
   stock: Number(p.stock || 0),
-  status: p.status || (p.stock > 0 ? 'In Stock' : 'Out of Stock'),
+  status: p.status || 'Draft',
+  stockStatus: deriveStockStatus(p.stock),
   imageUrl: p.imageUrl || '',
   brand: p.brand || undefined,
   brandId: p.brandId || null,
@@ -25,6 +41,13 @@ export const mapProductForAdmin = (p: any) => ({
   attributes: safeJsonParse<{ name: string; values: string[] }[]>(p.attributes, []),
   variations: safeJsonParse<{ attribute: string; value: string; price: number; sku: string; stock: number }[]>(p.variations, []),
   galleryImages: safeJsonParse<string[]>(p.galleryImages, p.imageUrl ? [p.imageUrl] : []),
+  // Nested for the detail view, flat for the edit form — the form hydrates from
+  // the flat keys and would otherwise regenerate the slug from the name on save.
+  slug: p.slug || '',
+  seoSlug: p.seoSlug || p.slug || '',
+  metaTitle: p.metaTitle || '',
+  metaDescription: p.metaDescription || '',
+  metaKeywords: p.metaKeywords || '',
   seo: {
     slug: p.seoSlug || p.slug,
     metaTitle: p.metaTitle || p.name,

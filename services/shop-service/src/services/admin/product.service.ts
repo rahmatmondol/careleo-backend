@@ -56,7 +56,9 @@ const buildValues = (b: any) => {
   const values: any = {};
   if (b.name !== undefined) values.name = String(b.name).trim();
   if (b.sku !== undefined) values.sku = b.sku || null;
-  if (b.categoryId !== undefined) values.categoryId = b.categoryId || null;
+  // category_id is NOT NULL — only overwrite it when we actually got one,
+  // otherwise a partial update would fail the constraint.
+  if (b.categoryId) values.categoryId = b.categoryId;
   if (b.brandId !== undefined) values.brandId = b.brandId || null;
   if (b.sourceId !== undefined) values.sourceId = b.sourceId || null;
   if (b.brand !== undefined) values.brand = b.brand || null;

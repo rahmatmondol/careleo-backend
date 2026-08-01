@@ -8,4 +8,4 @@ import {
 export const publicRoutes = new Elysia()
   .get('/api/v1/shop/categories', () => getCategoriesController())
   .get('/api/v1/shop/products', ({ query }) => getProductsController(query))
-  .get('/api/v1/shop/products/:id', ({ params }) => getProductByIdController(params));
+  .get('/api/v1/shop/products/:id', ({ params, set }) => getProductByIdController(params, set));

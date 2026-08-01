@@ -23,6 +23,9 @@ services:
       - "5433:5432"
     volumes:
       - careleo_pg_data:/var/lib/postgresql/data
+      # Creates careleo_shop / _social / _video / _media / _freelancer.
+      # Only runs when the data volume is first initialised.
+      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U careleo -d careleo"]
       interval: 5s
@@ -43,6 +46,34 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # ---------- one-shot: create the per-service databases ----------
+  # /docker-entrypoint-initdb.d only runs when the postgres volume is created
+  # for the very first time, so on any existing volume the service databases
+  # never appear and shop/media/... crash-loop on "database does not exist".
+  # This runs on every `up`, is idempotent, and the dependent services wait for
+  # it to exit successfully.
+  db-init:
+    image: pgvector/pgvector:pg16
+    container_name: careleo-db-init
+    restart: "no"
+    environment:
+      PGPASSWORD: careleo_dev_password
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        for db in careleo_shop careleo_social careleo_video careleo_media careleo_freelancer; do
+          psql -h careleo-postgres -U careleo -d careleo -tc \
+            "select 1 from pg_database where datname = '$$db'" | grep -q 1 \
+            || psql -h careleo-postgres -U careleo -d careleo -c \
+                 "create database $$db owner careleo"
+          echo "database ready: $$db"
+        done
+    depends_on:
+      careleo-postgres:
+        condition: service_healthy
 
   # ---------- API Gateway ----------
   api-gateway:
@@ -94,6 +125,8 @@ services:
     depends_on:
       careleo-postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
       careleo-redis:
         condition: service_healthy
 
@@ -112,6 +145,8 @@ services:
     depends_on:
       careleo-postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
 
   # ---------- social-service ----------
   social-service:
@@ -127,6 +162,8 @@ services:
     depends_on:
       careleo-postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
 
   # ---------- video-service ----------
   video-service:
@@ -142,6 +179,8 @@ services:
     depends_on:
       careleo-postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
 
   # ---------- media-service ----------
   media-service:
@@ -155,7 +194,7 @@ services:
       INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:-pawly-internal}
       MEDIA_STORAGE_DRIVER: local
       MEDIA_LOCAL_UPLOAD_DIR: /app/uploads/media
-      MEDIA_PUBLIC_BASE_URL: http://localhost:8090/api/v1/media/files
+      MEDIA_PUBLIC_BASE_URL: http://192.168.0.103:8090/api/v1/media/files
     ports:
       - "3017:3017"
     volumes:
@@ -163,6 +202,8 @@ services:
     depends_on:
       careleo-postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
 
   # ---------- freelancer-service ----------
   freelancer-service:
@@ -179,6 +220,8 @@ services:
     depends_on:
       careleo-postgres:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
 
 volumes:
   careleo_pg_data:

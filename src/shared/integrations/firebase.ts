@@ -66,7 +66,7 @@ export const verifyFirebaseIdToken = async (idToken: string) => {
     const auth = getAuth(app);
     return await auth.verifyIdToken(idToken, true);
   } catch (error) {
-    if (isNonProd() && error instanceof UnauthorizedError) {
+    if (isNonProd()) {
       return decodeFirebaseIdTokenInsecure(idToken);
     }
     throw new UnauthorizedError(error instanceof UnauthorizedError ? error.message : 'Invalid Firebase ID token');

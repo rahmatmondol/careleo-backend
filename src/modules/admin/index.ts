@@ -2,6 +2,7 @@ import { Elysia } from 'elysia';
 import { AdminService } from './service';
 import { AdminAiService } from './ai-service';
 import { requireAuth, requirePermission } from '@/shared/auth/guards';
+import { getProviderCatalog } from '@/modules/ai/provider-catalog';
 
 export const adminController = new Elysia({ name: 'admin-controller' }).group('/admin', (app) =>
   app
@@ -110,6 +111,15 @@ export const adminController = new Elysia({ name: 'admin-controller' }).group('/
     })
 
     // ─── Admin AI: Model Key Management ───────────────────────────────
+    // Provider catalog for the "add model" form dropdown (labels, base-URL
+    // requirement, subscription-proxy caveat, example model).
+    .get('/ai/providers', async (ctx: any) => {
+      const { headers, jwt } = ctx;
+      const user = await requireAuth(headers, jwt);
+      requirePermission(user, 'orders.read');
+      return { success: true, data: getProviderCatalog(), error: null };
+    })
+
     .get('/ai/models', async (ctx: any) => {
       const { headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);

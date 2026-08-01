@@ -12,6 +12,7 @@ import {
 } from '@/shared/db/schema/ai.schema';
 import { pets, users } from '@/shared/db/schema';
 import { invalidateModelCache } from '@/modules/ai/model-registry';
+import { validateAndNormalizeProvider } from '@/modules/ai/provider-catalog';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
@@ -239,15 +240,22 @@ export const AdminAiService = {
     costPer1kOutput?: number;
     createdBy: string;
   }) {
+    // Validate + normalize the provider (subscription-proxy aliases → *_custom,
+    // enforce base URL where required) before persisting.
+    const normalized = validateAndNormalizeProvider({
+      provider: data.provider,
+      baseUrl: data.baseUrl,
+    });
+
     const rows = await db
       .insert(aiModelConfigs)
       .values({
-        provider: data.provider,
+        provider: normalized.provider,
         modelName: data.modelName,
         displayName: data.displayName ?? null,
         apiKeyEncrypted: data.apiKey,
         purpose: data.purpose,
-        baseUrl: data.baseUrl ?? null,
+        baseUrl: normalized.baseUrl,
         notes: data.notes ?? null,
         isActive: false,
         maxTokensPerDay: data.maxTokensPerDay ?? null,
@@ -315,12 +323,35 @@ export const AdminAiService = {
     costPer1kOutput?: number;
   }) {
     const updates: Record<string, any> = { updatedAt: new Date() };
-    if (data.provider !== undefined) updates.provider = data.provider;
+
+    // If the provider is being changed, validate + normalize it. Base URL may
+    // come in this same update or already be stored — fall back to the stored
+    // value so we don't reject a valid *_custom row that keeps its old URL.
+    if (data.provider !== undefined) {
+      let baseUrlForCheck: string | null | undefined = data.baseUrl;
+      if (baseUrlForCheck === undefined) {
+        const [existing] = await db
+          .select({ baseUrl: aiModelConfigs.baseUrl })
+          .from(aiModelConfigs)
+          .where(eq(aiModelConfigs.id, modelId))
+          .limit(1);
+        baseUrlForCheck = existing?.baseUrl ?? null;
+      }
+      const normalized = validateAndNormalizeProvider({
+        provider: data.provider,
+        baseUrl: baseUrlForCheck,
+      });
+      updates.provider = normalized.provider;
+      updates.baseUrl = normalized.baseUrl;
+    }
+
     if (data.modelName !== undefined) updates.modelName = data.modelName;
     if (data.displayName !== undefined) updates.displayName = data.displayName;
     if (data.apiKey !== undefined && data.apiKey.trim() !== '') updates.apiKeyEncrypted = data.apiKey;
     if (data.purpose !== undefined) updates.purpose = data.purpose;
-    if (data.baseUrl !== undefined) updates.baseUrl = data.baseUrl || null;
+    // Only apply a standalone baseUrl update when the provider isn't also
+    // changing (that path already set baseUrl via normalization above).
+    if (data.baseUrl !== undefined && data.provider === undefined) updates.baseUrl = data.baseUrl || null;
     if (data.notes !== undefined) updates.notes = data.notes || null;
     if (data.maxTokensPerDay !== undefined) updates.maxTokensPerDay = data.maxTokensPerDay || null;
     if (data.maxTokensPerUserDay !== undefined) updates.maxTokensPerUserDay = data.maxTokensPerUserDay || null;

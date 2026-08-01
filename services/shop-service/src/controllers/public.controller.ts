@@ -8,8 +8,11 @@ export async function getProductsController(query: any) {
   return publicService.listProducts(query);
 }
 
-export async function getProductByIdController(params: { id: string }) {
-  const product = await publicService.getProductById(params.id);
-  if (!product) return { error: 'Product not found' };
+export async function getProductByIdController(params: { id: string }, set?: { status?: number }) {
+  const product = await publicService.getProductByIdOrSlug(params.id);
+  if (!product) {
+    if (set) set.status = 404;
+    return { error: 'Product not found' };
+  }
   return { product };
 }
