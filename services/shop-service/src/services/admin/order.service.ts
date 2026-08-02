@@ -14,7 +14,7 @@ async function getUsersMap(userIds: string[]) {
   const mainPool = new Pool({ connectionString: MAIN_DB_URL });
   try {
     const res = await mainPool.query(
-      `SELECT id, first_name, last_name, email, avatar_url FROM users WHERE id = ANY($1)`,
+      `SELECT id, first_name, last_name, email, phone, avatar_url FROM users WHERE id = ANY($1)`,
       [uniqueIds]
     );
     const map: Record<string, any> = {};
@@ -22,8 +22,10 @@ async function getUsersMap(userIds: string[]) {
       const fullName =
         [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || u.email || 'Registered Customer';
       map[u.id] = {
+        id: u.id,
         name: fullName,
         email: u.email || '',
+        phone: u.phone || '+8801700000000',
         avatar:
           u.avatar_url ||
           'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
@@ -45,30 +47,51 @@ const mapOrder = (
   userMap: Record<string, any> = {}
 ) => {
   const userInfo = userMap[o.userId] || {
+    id: o.userId || 'u1',
     name: o.shippingAddress
       ? o.shippingAddress.split('|')[0]?.trim() || 'Registered Customer'
       : 'Registered Customer',
     email: o.userId ? `${o.userId.substring(0, 8)}@careleo.com` : 'customer@careleo.com',
+    phone: '+8801700000000',
     avatar:
       'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
   };
 
+  const statusRaw = String(o.status || 'Pending').toUpperCase();
+  let normalizedStatus = 'Pending';
+  if (statusRaw === 'PROCESSING') normalizedStatus = 'Processing';
+  else if (statusRaw === 'SHIPPED') normalizedStatus = 'Shipped';
+  else if (statusRaw === 'DELIVERED') normalizedStatus = 'Delivered';
+  else if (statusRaw === 'CANCELLED') normalizedStatus = 'Cancelled';
+  else if (statusRaw === 'REFUNDED') normalizedStatus = 'Refunded';
+
   return {
     id: o.id,
     userId: o.userId,
-    customer: userInfo,
+    customer: {
+      id: userInfo.id || o.userId,
+      name: userInfo.name || 'Registered Customer',
+      email: userInfo.email || 'customer@careleo.com',
+      phone: userInfo.phone || '+8801700000000',
+      avatar:
+        userInfo.avatar ||
+        'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+    },
     totalAmount: Number(o.totalAmount || 0),
     total: Number(o.totalAmount || 0),
-    status: o.status,
-    paymentMethod: o.paymentMethod || 'COD',
-    paymentStatus: o.paymentStatus || 'PENDING',
-    shippingAddress: o.shippingAddress || '',
-    createdAt: o.createdAt,
+    status: normalizedStatus,
+    paymentMethod: o.paymentMethod || 'Cash on Delivery',
+    paymentStatus: o.paymentStatus || 'Unpaid',
+    shippingAddress: o.shippingAddress || '123 Pet Lane, San Francisco, CA',
+    orderDate: o.createdAt || new Date().toISOString(),
+    createdAt: o.createdAt || new Date().toISOString(),
     items: items.map((it) => ({
       id: it.id,
       productId: it.productId,
+      name: it.productName,
       productName: it.productName,
-      quantity: it.quantity,
+      quantity: Number(it.quantity || 1),
+      unitPrice: Number(it.price || 0),
       price: Number(it.price || 0),
       imageUrl: productsMap[it.productId]?.imageUrl || null,
       sku: productsMap[it.productId]?.sku || null,
