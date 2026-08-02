@@ -106,7 +106,7 @@ const getRealProductsFromDb = async (search?: string, categoryId?: string) => {
     return filtered.map((p: any) => {
       const nameStr = String(p.name || '');
       const nameParts = nameStr.split(' ');
-      const fallbackBrand = nameParts[0] || 'PAWLY';
+      const fallbackBrand = nameParts[0] || 'CARELEO';
       return {
         id: String(p.id),
         name: nameStr,
@@ -165,10 +165,85 @@ const getRealCategoriesFromDb = async () => {
   }
 };
 
+const getRealOrdersFromDb = async () => {
+  try {
+    const res = await pool.query(`
+      SELECT 
+        id, 
+        user_id as "userId", 
+        total_amount as "totalAmount", 
+        status, 
+        payment_method as "paymentMethod", 
+        payment_status as "paymentStatus", 
+        shipping_address as "shippingAddress", 
+        created_at as "createdAt"
+      FROM orders
+      ORDER BY created_at DESC
+    `);
+    const ordersList = res.rows || [];
+
+    const userIds = ordersList.map((o: any) => o.userId).filter(Boolean);
+    let usersMap: Record<string, any> = {};
+    if (userIds.length > 0) {
+      try {
+        const mainPool = new Pool({
+          connectionString:
+            process.env.DATABASE_URL || 'postgres://careleo:careleo_dev_password@localhost:5433/careleo',
+        });
+        const userRes = await mainPool.query(
+          `SELECT id, first_name, last_name, email, avatar_url FROM users WHERE id = ANY($1)`,
+          [userIds]
+        );
+        for (const u of userRes.rows) {
+          const fullName =
+            [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || u.email || 'Customer';
+          usersMap[u.id] = {
+            id: u.id,
+            name: fullName,
+            email: u.email || '',
+            avatar:
+              u.avatar_url ||
+              'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+          };
+        }
+        await mainPool.end();
+      } catch (e) {
+        console.warn('[store] error fetching users for orders:', e);
+      }
+    }
+
+    return ordersList.map((o: any) => {
+      const customer = usersMap[o.userId] || {
+        name: o.shippingAddress
+          ? o.shippingAddress.split('|')[0]?.trim() || 'Registered Customer'
+          : 'Registered Customer',
+        email: o.userId ? `${o.userId.substring(0, 8)}@careleo.com` : 'customer@careleo.com',
+        avatar:
+          'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+      };
+      return {
+        id: o.id,
+        userId: o.userId,
+        customer,
+        totalAmount: Number(o.totalAmount || 0),
+        total: Number(o.totalAmount || 0),
+        status: o.status || 'PENDING',
+        paymentMethod: o.paymentMethod || 'COD',
+        paymentStatus: o.paymentStatus || 'PENDING',
+        shippingAddress: o.shippingAddress || '',
+        createdAt: o.createdAt,
+      };
+    });
+  } catch (err: any) {
+    console.warn('[store] error fetching real orders:', err);
+    return mockOrders;
+  }
+};
+
 // ── Smart Fallback Request Handler ───────────────────────────────────────────
 const handleFallback = async (request: Request, set: any) => {
   const url = new URL(request.url);
-  const shopPath = url.pathname.replace(/^\/api\/v1\/shop\/?/, '') || '';
+  const shopPath = url.pathname.replace(/^\/api\/v1\/(shop|admin\/shop)\/?/, '') || '';
   const method = request.method.toUpperCase();
 
   set.status = 200;
@@ -250,8 +325,9 @@ const handleFallback = async (request: Request, set: any) => {
   }
 
   // GET /orders
-  if (shopPath === 'orders' && method === 'GET') {
-    return { success: true, data: { orders: mockOrders } };
+  if ((shopPath === 'orders' || shopPath.endsWith('orders')) && method === 'GET') {
+    const ordersList = await getRealOrdersFromDb();
+    return { success: true, data: { orders: ordersList } };
   }
 
   // Default Fallback
