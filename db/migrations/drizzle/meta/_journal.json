@@ -57,6 +57,20 @@
       "when": 1781815345007,
       "tag": "0007_aberrant_microbe",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785784611960,
+      "tag": "0008_premium_invaders",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1785873647408,
+      "tag": "0009_sour_patriot",
+      "breakpoints": true
     }
   ]
 }

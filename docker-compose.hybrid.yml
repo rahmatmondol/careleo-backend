@@ -1,12 +1,37 @@
 # =============================================================
-# CareLeo Hybrid Stack
-#   api-gateway (:8080)  -> single entry point
-#     /api/v1/shop/*        -> shop-service        (:3004)
-#     /api/v1/social/*      -> social-service      (:3008)
-#     /api/v1/video/*       -> video-service       (:3014)
-#     /api/v1/freelancer/*  -> freelancer-service  (:3020)
-#     /api/v1/*             -> careleo-backend      (:3000)  [catch-all]
-#   postgres (:5433) + redis (:6379) shared infra
+# CareLeo full stack — one API process.
+#
+#   careleo-backend (:3000)  ← the entire API
+#     auth · pets · ai · tasks · vets · adoption · subscriptions ·
+#     shop · social · video · media · freelancer
+#   postgres (:5433) + redis (:6379)
+#
+# The filename still says "hybrid" for continuity with existing scripts and
+# docs; there is nothing hybrid about it any more. It used to run seven
+# containers — an api-gateway fanning out to shop / social / video / media /
+# freelancer services plus this backend, each with its own database. All of
+# them are modules of careleo-backend now, and the gateway went with them:
+# this app already did its CORS and Swagger, and its rate limit moved into
+# src/app.ts.
+#
+# Use docker-compose.yml instead for daily dev — it starts only Postgres and
+# Redis, and you run `bun run dev` yourself.
+#
+# Migrating an existing stack:
+#   1. docker compose -f docker-compose.hybrid.yml up -d careleo-postgres
+#   2. bun run db:migrate                                  # creates the merged tables
+#   3. bun run scripts/migrate-service-dbs.ts --orphans    # dry integrity check
+#   4. bun run scripts/migrate-service-dbs.ts              # copy the data across
+#   5. docker compose -f docker-compose.hybrid.yml up -d --remove-orphans
+#
+# `--remove-orphans` is what tears down the old gateway and service containers.
+#
+# The old careleo_shop / _social / _video / _media / _freelancer databases are
+# left in place by that script. Drop them once you have verified the merged
+# data and taken a backup — see docs/microservices/merge-into-monolith.md.
+#
+# ⚠️ Clients previously reached the gateway on host port 8090. That port is
+# gone; everything talks to :3000 directly now.
 # =============================================================
 
 services:
@@ -23,9 +48,6 @@ services:
       - "5433:5432"
     volumes:
       - careleo_pg_data:/var/lib/postgresql/data
-      # Creates careleo_shop / _social / _video / _media / _freelancer.
-      # Only runs when the data volume is first initialised.
-      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U careleo -d careleo"]
       interval: 5s
@@ -47,58 +69,7 @@ services:
       timeout: 3s
       retries: 20
 
-  # ---------- one-shot: create the per-service databases ----------
-  # /docker-entrypoint-initdb.d only runs when the postgres volume is created
-  # for the very first time, so on any existing volume the service databases
-  # never appear and shop/media/... crash-loop on "database does not exist".
-  # This runs on every `up`, is idempotent, and the dependent services wait for
-  # it to exit successfully.
-  db-init:
-    image: pgvector/pgvector:pg16
-    container_name: careleo-db-init
-    restart: "no"
-    environment:
-      PGPASSWORD: careleo_dev_password
-    entrypoint:
-      - sh
-      - -c
-      - |
-        set -e
-        for db in careleo_shop careleo_social careleo_video careleo_media careleo_freelancer; do
-          psql -h careleo-postgres -U careleo -d careleo -tc \
-            "select 1 from pg_database where datname = '$$db'" | grep -q 1 \
-            || psql -h careleo-postgres -U careleo -d careleo -c \
-                 "create database $$db owner careleo"
-          echo "database ready: $$db"
-        done
-    depends_on:
-      careleo-postgres:
-        condition: service_healthy
-
-  # ---------- API Gateway ----------
-  api-gateway:
-    build: ./services/api-gateway
-    container_name: careleo-gateway
-    restart: unless-stopped
-    environment:
-      PORT: "8080"
-      CARELEO_SERVICE_URL: http://careleo-backend:3000
-      SHOP_SERVICE_URL: http://shop-service:3004
-      SOCIAL_SERVICE_URL: http://social-service:3008
-      VIDEO_SERVICE_URL: http://video-service:3014
-      MEDIA_SERVICE_URL: http://media-service:3017
-      FREELANCER_SERVICE_URL: http://freelancer-service:3020
-    ports:
-      - "8090:8080"
-    depends_on:
-      - careleo-backend
-      - shop-service
-      - social-service
-      - video-service
-      - media-service
-      - freelancer-service
-
-  # ---------- careleo-backend (monolith catch-all) ----------
+  # ---------- careleo-backend (the whole API) ----------
   careleo-backend:
     build: .
     container_name: careleo-backend
@@ -114,114 +85,30 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_GEMINI_API_KEY: ${GOOGLE_GEMINI_API_KEY:-}
-      SHOP_SERVICE_URL: http://shop-service:3004
-      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
-      FREELANCER_SERVICE_URL: http://freelancer-service:3020
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
       FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
-    ports:
-      - "3000:3000"
-    depends_on:
-      careleo-postgres:
-        condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
-      careleo-redis:
-        condition: service_healthy
-
-  # ---------- shop-service ----------
-  shop-service:
-    build: ./services/shop-service
-    container_name: careleo-shop
-    restart: unless-stopped
-    environment:
-      PORT: "3004"
-      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_shop
-      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
-      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
-    ports:
-      - "3004:3004"
-    depends_on:
-      careleo-postgres:
-        condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
-
-  # ---------- social-service ----------
-  social-service:
-    build: ./services/social-service
-    container_name: careleo-social
-    restart: unless-stopped
-    environment:
-      PORT: "3008"
-      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_social
-      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
-    ports:
-      - "3008:3008"
-    depends_on:
-      careleo-postgres:
-        condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
-
-  # ---------- video-service ----------
-  video-service:
-    build: ./services/video-service
-    container_name: careleo-video
-    restart: unless-stopped
-    environment:
-      PORT: "3014"
-      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_video
-      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
-    ports:
-      - "3014:3014"
-    depends_on:
-      careleo-postgres:
-        condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
-
-  # ---------- media-service ----------
-  media-service:
-    build: ./services/media-service
-    container_name: careleo-media
-    restart: unless-stopped
-    environment:
-      PORT: "3017"
-      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_media
-      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
-      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:-pawly-internal}
+      # Moved here from the api-gateway.
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      # Media library (was media-service). Uploads are served back through
+      # /api/v1/media/files/*, so the public base URL points at this service.
       MEDIA_STORAGE_DRIVER: local
       MEDIA_LOCAL_UPLOAD_DIR: /app/uploads/media
-      MEDIA_PUBLIC_BASE_URL: http://192.168.0.103:8090/api/v1/media/files
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-http://192.168.0.103:3000/api/v1/media/files}
+      # Only still read by the legacy /shop/internal/* and /freelancer/internal/*
+      # routes. Nothing in this repo sends it; remove once no old client does.
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
     ports:
-      - "3017:3017"
+      - "3000:3000"
     volumes:
+      # Carried over from media-service so existing uploads survive the merge.
       - careleo_media_uploads:/app/uploads/media
     depends_on:
       careleo-postgres:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
-
-  # ---------- freelancer-service ----------
-  freelancer-service:
-    build: ./services/freelancer-service
-    container_name: careleo-freelancer
-    restart: unless-stopped
-    environment:
-      PORT: "3020"
-      DATABASE_URL: postgresql://careleo:careleo_dev_password@careleo-postgres:5432/careleo_freelancer
-      JWT_SECRET: ${JWT_ACCESS_SECRET:-super_secret_jwt_key_change_in_prod}
-      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:-dev_internal_service_secret_change_me}
-    ports:
-      - "3020:3020"
-    depends_on:
-      careleo-postgres:
+      careleo-redis:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
 
 volumes:
   careleo_pg_data:

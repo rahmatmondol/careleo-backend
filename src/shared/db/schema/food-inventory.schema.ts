@@ -11,7 +11,7 @@ import { pets } from './pets.schema';
 import { users } from './auth';
 
 /**
- * Per-pet food stock the AI tracks. productId references a shop-service product
+ * Per-pet food stock the AI tracks. productId references a shop module product
  * (no cross-service FK). quantityUnits + dailyConsumption drive days-remaining
  * and the low-stock alert.
  */
@@ -25,7 +25,7 @@ export const foodInventory = pgTable(
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    productId: uuid('product_id'), // shop-service product id (nullable until linked)
+    productId: uuid('product_id'), // shop module product id (nullable until linked)
     productName: varchar('product_name', { length: 200 }),
     quantityUnits: numeric('quantity_units', { precision: 12, scale: 2 }).notNull().default('0'),
     dailyConsumption: numeric('daily_consumption', { precision: 12, scale: 2 }).notNull().default('0'),
@@ -43,7 +43,7 @@ export const foodInventory = pgTable(
 /**
  * Re-order requests/history. status: pending_confirm | placed | auto_placed |
  * cancelled | failed. mode: assisted (user confirms) | auto (Premium, background).
- * shopOrderId is the shop-service order id once placed.
+ * shopOrderId is the shop module's order id once placed.
  */
 export const reorders = pgTable(
   'reorders',

@@ -1,12 +1,20 @@
 /**
- * Internal HTTP client for the freelancer-service.
+ * Freelancer marketplace access for the AI tools.
  *
- * Mirrors shop-client.ts. All calls are best-effort — failures return null/[]
- * so a freelancer-service outage never breaks an AI reply.
+ * This was an HTTP client pointed at `FREELANCER_SERVICE_URL`, authenticating
+ * with the shared `INTERNAL_SERVICE_SECRET` against a set of `/internal/*`
+ * endpoints that existed only so one service could act on another's data.
+ *
+ * The marketplace is a module in this process now, so these call
+ * `InternalService` directly. The `/internal/*` routes still exist (see
+ * `modules/freelancer/internal/index.ts`) but nothing in this repo calls them
+ * over HTTP any more.
+ *
+ * Best-effort contract preserved: `[]` / `null` on failure, so a marketplace
+ * error degrades an AI reply rather than failing the chat turn around it.
  */
 
-const FREELANCER_BASE = (process.env.FREELANCER_SERVICE_URL ?? 'http://freelancer-service:3020').replace(/\/$/, '');
-const INTERNAL_SECRET = process.env.INTERNAL_SERVICE_SECRET ?? '';
+import { InternalService } from './internal/service';
 
 export type FreelancerListing = {
   serviceId: string;
@@ -23,61 +31,62 @@ export type FreelancerListing = {
 
 export type FreelancerJob = { id: string; customerId: string; profileId: string; status: string };
 
-/** List available freelancers for a service type (used by list_freelancers AI tool). */
-export const listFreelancers = async (serviceType: string, location?: string): Promise<FreelancerListing[]> => {
+/** List available freelancers for a service type (used by the list_freelancers AI tool). */
+export const listFreelancers = async (
+  serviceType: string,
+  location?: string,
+): Promise<FreelancerListing[]> => {
   try {
-    const url = new URL(`${FREELANCER_BASE}/api/v1/freelancer/internal/freelancers`);
-    url.searchParams.set('serviceType', serviceType);
-    if (location) url.searchParams.set('location', location);
-
-    const res = await fetch(url.toString(), {
-      headers: { Accept: 'application/json', 'x-internal-secret': INTERNAL_SECRET },
-    });
-    if (!res.ok) return [];
-    const body: any = await res.json().catch(() => null);
-    const list = body?.data?.freelancers ?? body?.freelancers ?? [];
+    const result: any = await InternalService.listForServiceType(serviceType, location);
+    const list = result?.data?.freelancers ?? [];
     return Array.isArray(list) ? (list as FreelancerListing[]) : [];
   } catch (e: any) {
-    console.warn('[freelancer-client] listFreelancers failed:', e?.message ?? e);
+    console.warn('[freelancer] listFreelancers failed:', e?.message ?? e);
     return [];
   }
 };
 
 /** Send a job letter on behalf of a customer (AI send_job_letter tool path). */
 export const sendJobLetter = async (params: {
-  customerId: string; customerEmail: string; petId: string; petName?: string;
-  profileId: string; serviceId?: string; message?: string; proposedSchedule?: string;
+  customerId: string;
+  customerEmail: string;
+  petId: string;
+  petName?: string;
+  profileId: string;
+  serviceId?: string;
+  message?: string;
+  proposedSchedule?: string;
 }): Promise<FreelancerJob | null> => {
   try {
-    const res = await fetch(`${FREELANCER_BASE}/api/v1/freelancer/internal/jobs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-internal-secret': INTERNAL_SECRET },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) return null;
-    const body: any = await res.json().catch(() => null);
-    return body?.data?.job ?? body?.job ?? null;
+    const result: any = await InternalService.createJob(params);
+    if (result?.status) {
+      console.warn('[freelancer] sendJobLetter rejected:', result.error);
+      return null;
+    }
+    return result?.data?.job ?? null;
   } catch (e: any) {
-    console.warn('[freelancer-client] sendJobLetter failed:', e?.message ?? e);
+    console.warn('[freelancer] sendJobLetter failed:', e?.message ?? e);
     return null;
   }
 };
 
-/** Auto-hire best freelancer (Premium; AI auto_hire_freelancer tool path). */
+/** Auto-hire the best freelancer (Premium; AI auto_hire_freelancer tool path). */
 export const autoHireFreelancer = async (params: {
-  customerId: string; customerEmail: string; petId: string; petName?: string; serviceType: string;
+  customerId: string;
+  customerEmail: string;
+  petId: string;
+  petName?: string;
+  serviceType: string;
 }): Promise<{ job: FreelancerJob; booking: unknown; freelancer: unknown } | null> => {
   try {
-    const res = await fetch(`${FREELANCER_BASE}/api/v1/freelancer/internal/auto-hire`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-internal-secret': INTERNAL_SECRET },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) return null;
-    const body: any = await res.json().catch(() => null);
-    return body?.data ?? null;
+    const result: any = await InternalService.autoHire(params);
+    if (result?.status) {
+      console.warn('[freelancer] autoHireFreelancer rejected:', result.error);
+      return null;
+    }
+    return result?.data ?? null;
   } catch (e: any) {
-    console.warn('[freelancer-client] autoHireFreelancer failed:', e?.message ?? e);
+    console.warn('[freelancer] autoHireFreelancer failed:', e?.message ?? e);
     return null;
   }
 };

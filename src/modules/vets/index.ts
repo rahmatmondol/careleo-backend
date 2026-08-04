@@ -16,6 +16,9 @@ export const vetsController = new Elysia({ name: 'vets-controller' }).group('/ve
     .get('/:id/services', async ({ params }) => VetsService.getVetServices(String((params as any).id)))
     /** Get availability slots for one vet. */
     .get('/:id/availability', async ({ params }) => VetsService.getVetAvailability(String((params as any).id)))
+    /** Bookable 30-min slots for one vet on a date (`?date=YYYY-MM-DD&mode=video`). */
+    .get('/:id/slots', async ({ params, query }: any) =>
+      VetsService.getVetSlots(String(params.id), query?.date, query?.mode === 'video' || query?.mode === 'visit' ? query.mode : undefined))
     /** Book video appointment with a vet. */
     .post('/:id/book-video', async ({ headers, jwt, params, body }: any) => {
       const user = await requireAuth(headers, jwt);

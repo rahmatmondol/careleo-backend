@@ -106,8 +106,15 @@ export const FoodInventoryService = {
     return reorder;
   },
 
-  /** Assisted: place a pending re-order using the user's bearer token (cart+checkout). */
-  confirmReorder: async (userId: string, reorderId: string, authToken: string): Promise<ReorderRow> => {
+  /**
+   * Assisted: place a pending re-order (cart + checkout).
+   *
+   * `authToken` is no longer used. It existed to authenticate an HTTP call to
+   * shop-service; the shop is in-process now, so the already-authenticated
+   * `userId` is what identifies the cart. The parameter is kept so the
+   * controller signature does not change, and is ignored.
+   */
+  confirmReorder: async (userId: string, reorderId: string, _authToken?: string): Promise<ReorderRow> => {
     if (!(await can(userId, 'assisted_reorder')) && !(await can(userId, 'auto_reorder'))) {
       throw new UnauthorizedError('Re-ordering is not included in your plan');
     }
@@ -115,10 +122,9 @@ export const FoodInventoryService = {
     if (!reorder || reorder.userId !== userId) throw new NotFoundError('Re-order not found');
     if (reorder.status !== 'pending_confirm') return reorder;
     if (!reorder.productId) throw new ValidationError('Re-order has no product');
-    if (!authToken) throw new ValidationError('Missing auth token for checkout');
 
-    const added = await addToShopCart(authToken, reorder.productId, reorder.quantity);
-    const order = added ? await shopCheckout(authToken) : null;
+    const added = await addToShopCart(userId, reorder.productId, reorder.quantity);
+    const order = added ? await shopCheckout(userId) : null;
     if (!order) {
       return (await FoodInventoryModel.updateReorder(reorderId, { status: 'failed' }))!;
     }

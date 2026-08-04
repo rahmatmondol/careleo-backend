@@ -1,0 +1,8 @@
+import { and, desc, eq } from 'drizzle-orm';
+import { db } from '@/shared/db';
+import { productSubscriptions } from '@/shared/db/schema';
+
+export async function createSubscription(userId: string, b: any){ const nextDate = new Date(); nextDate.setDate(nextDate.getDate() + b.frequencyDays); const result = await db.insert(productSubscriptions).values({ userId, productId: b.productId, quantity: b.quantity && b.quantity > 0 ? b.quantity : 1, frequencyDays: b.frequencyDays, nextOrderDate: nextDate.toISOString().split('T')[0] }).returning(); return { message: 'Subscription created', subscription: result[0] }; }
+export async function listSubscriptions(userId: string){ const result = await db.select().from(productSubscriptions).where(eq(productSubscriptions.userId, userId)).orderBy(desc(productSubscriptions.createdAt)); return { subscriptions: result }; }
+export async function updateSubscription(userId: string, id: string, b: any){ const updateData: any = {}; if (b.frequencyDays) updateData.frequencyDays = b.frequencyDays; if (b.isActive !== undefined) updateData.isActive = b.isActive; const result = await db.update(productSubscriptions).set(updateData).where(and(eq(productSubscriptions.id, id), eq(productSubscriptions.userId, userId))).returning(); if (!result.length) return { error: 'Subscription not found', status: 404 }; return { message: 'Subscription updated', subscription: result[0] }; }
+export async function deleteSubscription(userId: string, id: string){ const result = await db.delete(productSubscriptions).where(and(eq(productSubscriptions.id, id), eq(productSubscriptions.userId, userId))).returning(); if (!result.length) return { error: 'Subscription not found', status: 404 }; return { message: 'Subscription cancelled' }; }

@@ -14,3 +14,9 @@ export * from './user-notifications.schema';
 export * from './subscriptions.schema';
 export * from './pet-profiles.schema';
 export * from './food-inventory.schema';
+
+// ─── Domains merged in from the former standalone services ────────────────
+export * from './shop.schema';
+export * from './social.schema';
+export * from './media.schema';
+export * from './freelancer.schema';

@@ -27,9 +27,19 @@ const EnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   GOOGLE_GEMINI_API_KEY: z.string().optional(),
 
-  // Store service (internal microservice for products/orders)
-  SHOP_SERVICE_URL: z.string().url().default('http://shop-service:3004'),
-  INTERNAL_SERVICE_SECRET: z.string().default('dev_internal_service_secret_change_me'),
+  /**
+   * Service-to-service secret for the legacy `/shop/internal/*` and
+   * `/freelancer/internal/*` routes.
+   *
+   * Nothing in this repo sends it any more — the shop and freelancer domains
+   * are modules in this process, so their callers are plain function calls. It
+   * is kept optional for the deployment window in which an older container may
+   * still be posting to those routes. Drop it once nothing does.
+   *
+   * `SHOP_SERVICE_URL` and the other `*_SERVICE_URL` variables are gone with
+   * the services they addressed.
+   */
+  INTERNAL_SERVICE_SECRET: z.string().optional(),
 
   // File Storage
   AWS_REGION: z.string().default('us-east-1'),
@@ -38,6 +48,11 @@ const EnvSchema = z.object({
   AWS_S3_BUCKET: z.string().optional(),
   STORAGE_TYPE: z.enum(['s3', 'local']).default('local'), // Use 'local' for dev, 's3' for prod
   STORAGE_LOCAL_PATH: z.string().default('./public/uploads'),
+
+  // Media library (formerly media-service). Local disk unless S3 is configured.
+  MEDIA_STORAGE_DRIVER: z.enum(['local', 's3']).optional(),
+  MEDIA_LOCAL_UPLOAD_DIR: z.string().default('./uploads/media'),
+  MEDIA_PUBLIC_BASE_URL: z.string().default('http://localhost:3000/api/v1/media/files'),
 
   // Notifications
   FCM_SERVER_KEY: z.string().optional(), // Firebase Cloud Messaging

@@ -243,10 +243,15 @@ export const AI_TOOL_DECLARATIONS = [
   },
   {
     name: 'get_vet_availability',
-    description: "Get a vet's available time slots so the user can pick one.",
+    description:
+      "Get a vet's free 30-minute booking slots on a specific date, already excluding times that are taken. Pass the date the user asked about; defaults to today.",
     parameters: {
       type: 'object',
-      properties: { vetId: { type: 'string', description: 'The vet ID' } },
+      properties: {
+        vetId: { type: 'string', description: 'The vet ID' },
+        date: { type: 'string', description: 'Date to check, as YYYY-MM-DD. Defaults to today.' },
+        type: { type: 'string', description: "Optional: 'video' or 'visit', to only show slots that accept it" },
+      },
       required: ['vetId'],
     },
   },
@@ -581,7 +586,13 @@ export async function executeTool(
       }
 
       case 'find_nearby_vets': {
-        const vets = await VetsModel.listVets({ location: args.location, specialty: args.specialty });
+        // `status: 'active'` matches what the app's directory shows — the AI
+        // should not offer to book a vet the admin has taken off the roster.
+        const vets = await VetsModel.listVets({
+          location: args.location,
+          specialty: args.specialty,
+          status: 'active',
+        });
         return JSON.stringify({
           success: true,
           vets: (vets as any[]).slice(0, 5).map((v) => ({
@@ -592,8 +603,13 @@ export async function executeTool(
       }
 
       case 'get_vet_availability': {
-        const slots = await VetsModel.listVetAvailability(args.vetId);
-        return JSON.stringify({ success: true, availability: slots });
+        // Was `listVetAvailability`, which returns the vet's recurring weekly
+        // windows ("Mondays 10:00–17:00"). The model read those as bookable
+        // times and offered them to users, including hours already taken and
+        // days that had passed. `getVetSlots` is the real answer.
+        const mode = args.type === 'video' || args.type === 'visit' ? args.type : undefined;
+        const slots = await VetsService.getVetSlots(args.vetId, args.date, mode);
+        return JSON.stringify({ success: true, ...slots });
       }
 
       case 'book_vet_appointment': {
@@ -687,7 +703,7 @@ export async function executeTool(
           message: args.message,
           proposedSchedule: args.proposedSchedule,
         });
-        if (!job) return JSON.stringify({ success: false, error: 'Failed to send job letter — freelancer-service may be unavailable' });
+        if (!job) return JSON.stringify({ success: false, error: 'Failed to send job letter — the freelancer marketplace rejected it' });
         return JSON.stringify({ success: true, jobId: job.id, message: 'Job letter sent! The freelancer will be notified.' });
       }
 

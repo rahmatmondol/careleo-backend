@@ -1,7 +1,18 @@
-import { index, pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 import { users } from './auth';
 
-/** Vet directory master table. */
+/**
+ * Vet directory master table.
+ *
+ * Vets are an admin-managed directory, not accounts: there is deliberately no
+ * `userId` here and no `vet` role. Everything about a vet — profile,
+ * availability, appointment status — is maintained from the admin panel.
+ *
+ * Note there is no `workingHours` column even though the admin form used to
+ * show one. `vet_availability` is the single source of that, and it is what
+ * `GET /vets/:id/slots` computes from; a second free-text copy would drift from
+ * the rows that actually decide what is bookable.
+ */
 export const vets = pgTable(
   'vets',
   {
@@ -13,10 +24,28 @@ export const vets = pgTable(
     rating: varchar('rating', { length: 10 }).default('0'),
     consultationFee: varchar('consultation_fee', { length: 40 }),
     avatarUrl: text('avatar_url'),
+
+    email: varchar('email', { length: 180 }),
+    phone: varchar('phone', { length: 40 }),
+    /** `active` | `inactive` | `on_leave` — lowercase, as everywhere else here. */
+    status: varchar('status', { length: 20 }).notNull().default('active'),
+    experienceYears: integer('experience_years').notNull().default(0),
+    /** JSON array of strings, e.g. `["DVM","MS Surgery"]` — matches `medicines_json`. */
+    qualificationsJson: text('qualifications_json'),
+    /**
+     * Admin's manual on/off switch, separate from `status`: a vet can be on the
+     * roster and still not be taking bookings this week.
+     */
+    isAvailable: boolean('is_available').notNull().default(true),
+
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index('idx_vets_specialty').on(table.specialty), index('idx_vets_location').on(table.location)],
+  (table) => [
+    index('idx_vets_specialty').on(table.specialty),
+    index('idx_vets_location').on(table.location),
+    index('idx_vets_status').on(table.status),
+  ],
 );
 
 /** Services offered by vets (e.g., vaccination, surgery, teleconsult). */

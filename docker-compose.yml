@@ -1,3 +1,11 @@
+# Dev infrastructure only — Postgres + Redis. You run `bun run dev` yourself.
+# Use docker-compose.hybrid.yml to run careleo-backend in a container too.
+#
+# This creates an *empty* `careleo` database. Tables come from Drizzle:
+#
+#   docker compose up -d
+#   bun run db:migrate
+#
 services:
   careleo-postgres:
     image: pgvector/pgvector:pg16
@@ -11,7 +19,17 @@ services:
       - "5433:5432"
     volumes:
       - careleo_pg_data:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+      # NOTE: `./db/migrations` used to be mounted here as
+      # /docker-entrypoint-initdb.d. On a fresh volume Postgres would auto-run
+      # the legacy 001–012*.sql files, which create `users`, `pets` and friends
+      # with IF NOT EXISTS. `bun run db:migrate` would then run Drizzle's 0000,
+      # which has no such guard, and die on "relation already exists" — so a
+      # brand-new database could never be migrated.
+      #
+      # Drizzle is the single source of truth (schema-first: edit a schema file,
+      # then db:generate + db:migrate), and its 0000–0008 already cover
+      # everything the legacy files did. The mount is gone; the .sql files are
+      # kept in db/migrations/ as history.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U careleo -d careleo"]
       interval: 5s

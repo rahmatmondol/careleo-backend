@@ -9,7 +9,9 @@ export type Permission =
   | 'orders.read'
   | 'orders.write'
   | 'sync.manage'
-  | 'plans.manage';
+  | 'plans.manage'
+  | 'vets.read'
+  | 'vets.write';
 
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   super_admin: [
@@ -22,6 +24,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'orders.write',
     'sync.manage',
     'plans.manage',
+    'vets.read',
+    'vets.write',
   ],
   admin: [
     'users.read',
@@ -31,8 +35,11 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'orders.write',
     'sync.manage',
     'plans.manage',
+    'vets.read',
+    'vets.write',
   ],
-  support: ['users.read', 'pets.read', 'orders.read'],
+  // Support can look up a vet to answer a booking question, not edit the roster.
+  support: ['users.read', 'pets.read', 'orders.read', 'vets.read'],
   customer: ['pets.read', 'pets.write'],
 };
 

@@ -28,6 +28,19 @@ const { startJobs } = await import('./jobs');
 
 const port = Number(process.env.PORT || 3000);
 
+/**
+ * Ensure the local media upload directory exists.
+ *
+ * media-service did this in its own entry point before writing any file. With
+ * the media library merged in, the first upload would otherwise fail on a fresh
+ * checkout. Skipped when uploads go to S3.
+ */
+const { MEDIA_LOCAL_UPLOAD_DIR, STORAGE_DRIVER } = await import('./modules/media/config/storage');
+if (STORAGE_DRIVER === 'local') {
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(MEDIA_LOCAL_UPLOAD_DIR, { recursive: true }).catch(() => {});
+}
+
 app.listen(port);
 try {
   await AuthModel.ensureReady();

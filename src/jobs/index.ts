@@ -9,6 +9,7 @@ import { runAiNudgeJob } from './ai-nudge.job';
 import { runDailyCheckinJob } from './daily-checkin.job';
 import { runLowStockJob } from './low-stock.job';
 import { runVaccineDueJob } from './vaccine-due.job';
+import { startSubscriptionRunner } from '@/modules/shop/jobs/subscription-runner';
 
 const TASK_CHECKER_INTERVAL_MS = 30 * 60 * 1000;  // 30 minutes
 const AI_NUDGE_INTERVAL_MS     = 2 * 60 * 60 * 1000; // 2 hours
@@ -21,6 +22,7 @@ let aiNudgeTimer: ReturnType<typeof setInterval> | null = null;
 let dailyCheckinTimer: ReturnType<typeof setInterval> | null = null;
 let lowStockTimer: ReturnType<typeof setInterval> | null = null;
 let vaccineDueTimer: ReturnType<typeof setInterval> | null = null;
+let subscriptionTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startJobs() {
   console.log('[Jobs] Starting background jobs...');
@@ -89,6 +91,17 @@ export function startJobs() {
     }
   }, VACCINE_DUE_INTERVAL_MS);
 
+  /**
+   * "Subscribe & save" recurring orders.
+   *
+   * shop-service started this itself from its own entry point. With the shop
+   * merged in there is no separate process to start it, so it joins the rest of
+   * the scheduler here. It owns its own cadence (`SUBSCRIPTION_TICK_MS`,
+   * hourly by default) and its own 10s startup delay, so it is started rather
+   * than driven by an interval declared above.
+   */
+  subscriptionTimer = startSubscriptionRunner();
+
   console.log('[Jobs] All background jobs started.');
 }
 
@@ -98,6 +111,7 @@ export function stopJobs() {
   if (dailyCheckinTimer) clearInterval(dailyCheckinTimer);
   if (lowStockTimer) clearInterval(lowStockTimer);
   if (vaccineDueTimer) clearInterval(vaccineDueTimer);
+  if (subscriptionTimer) clearInterval(subscriptionTimer);
   console.log('[Jobs] Background jobs stopped.');
 }
 

@@ -1,6 +1,6 @@
-import { and, desc, eq, ilike, sql } from 'drizzle-orm';
+import { and, desc, eq, ilike, or, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { vetAppointments, vetAvailability, vetPrescriptions, vetReviews, vetServices, vets } from '@/shared/db/schema';
+import { pets, users, vetAppointments, vetAvailability, vetPrescriptions, vetReviews, vetServices, vets } from '@/shared/db/schema';
 
 const parseJson = (value?: string | null) => {
   if (!value) return [];
@@ -11,130 +11,34 @@ const parseJson = (value?: string | null) => {
   }
 };
 
+/**
+ * DB access for the vets module.
+ *
+ * This used to open with `ensureTables()` — six `CREATE TABLE IF NOT EXISTS`
+ * statements re-run on every request via `ensureReady()` — plus a seed insert.
+ * Both are gone. The tables come from migration `0002_overconfident_young_avengers`,
+ * and keeping a second hand-written copy of the DDL had already gone wrong: the
+ * inline `vet_appointments` was missing `follow_up_at`, so on any database where
+ * it won the race the column simply did not exist. Seeding now lives in
+ * `scripts/seed-vets.ts`, run on purpose rather than on the first request.
+ */
 export const VetsModel = {
-  /** Ensure required vet module tables exist for local/dev runtime. */
-  async ensureTables() {
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS vets (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        full_name varchar(180) NOT NULL,
-        bio text,
-        specialty varchar(120),
-        location varchar(180),
-        rating varchar(10) DEFAULT '0',
-        consultation_fee varchar(40),
-        avatar_url text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS vet_services (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        vet_id uuid NOT NULL REFERENCES vets(id) ON DELETE CASCADE,
-        name varchar(160) NOT NULL,
-        description text,
-        fee varchar(40),
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS vet_availability (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        vet_id uuid NOT NULL REFERENCES vets(id) ON DELETE CASCADE,
-        day_of_week varchar(20) NOT NULL,
-        start_time varchar(20) NOT NULL,
-        end_time varchar(20) NOT NULL,
-        mode varchar(20) DEFAULT 'both',
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS vet_reviews (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        vet_id uuid NOT NULL REFERENCES vets(id) ON DELETE CASCADE,
-        user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        rating varchar(10) NOT NULL,
-        comment text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS vet_appointments (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        vet_id uuid NOT NULL REFERENCES vets(id) ON DELETE CASCADE,
-        user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        pet_id uuid,
-        type varchar(20) NOT NULL,
-        status varchar(30) NOT NULL DEFAULT 'scheduled',
-        appointment_at varchar(40) NOT NULL,
-        reason text,
-        notes text,
-        call_token text,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-
-    await db.execute(sql`
-      CREATE TABLE IF NOT EXISTS vet_prescriptions (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        appointment_id uuid NOT NULL REFERENCES vet_appointments(id) ON DELETE CASCADE,
-        user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        vet_id uuid NOT NULL REFERENCES vets(id) ON DELETE CASCADE,
-        medicines_json text NOT NULL,
-        instructions text,
-        refill_count varchar(10) DEFAULT '0',
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-  },
-
-  /** Seed minimal vet data if table is empty. */
-  async ensureSeedData() {
-    const countRows = await db.select({ count: sql<number>`count(*)::int` }).from(vets);
-    const count = countRows[0]?.count ?? 0;
-    if (count > 0) return;
-
-    const vetRows = await db
-      .insert(vets)
-      .values([
-        { fullName: 'Dr. Sarah Ahmed', specialty: 'General Practice', location: 'Dhaka', rating: '4.8', consultationFee: '1200' },
-        { fullName: 'Dr. Tanvir Hasan', specialty: 'Dermatology', location: 'Chattogram', rating: '4.6', consultationFee: '1500' },
-      ])
-      .returning();
-
-    if (vetRows[0]) {
-      await db.insert(vetServices).values([
-        { vetId: vetRows[0].id, name: 'General Checkup', fee: '1200' },
-        { vetId: vetRows[0].id, name: 'Vaccination', fee: '800' },
-      ]);
-      await db.insert(vetAvailability).values([
-        { vetId: vetRows[0].id, dayOfWeek: 'Monday', startTime: '10:00', endTime: '17:00', mode: 'both' },
-        { vetId: vetRows[0].id, dayOfWeek: 'Tuesday', startTime: '10:00', endTime: '17:00', mode: 'both' },
-      ]);
+  /**
+   * List vets with optional filters.
+   *
+   * The filters used to be a chain of either/ors where `search` shadowed the
+   * rest, so "cardiology vets in Dhaka" quietly ignored the location as soon as
+   * a search term was present. They now combine.
+   */
+  async listVets(filters: { search?: string; location?: string; specialty?: string; status?: string }) {
+    const conds = [];
+    if (filters.search) {
+      conds.push(or(ilike(vets.fullName, `%${filters.search}%`), ilike(vets.specialty, `%${filters.search}%`)));
     }
-  },
-
-  /** List vets with optional filters. */
-  async listVets(filters: { search?: string; location?: string; specialty?: string }) {
-    const where = filters.search
-      ? ilike(vets.fullName, `%${filters.search}%`)
-      : filters.location && filters.specialty
-      ? and(ilike(vets.location, `%${filters.location}%`), ilike(vets.specialty, `%${filters.specialty}%`))
-      : filters.location
-      ? ilike(vets.location, `%${filters.location}%`)
-      : filters.specialty
-      ? ilike(vets.specialty, `%${filters.specialty}%`)
-      : undefined;
+    if (filters.location) conds.push(ilike(vets.location, `%${filters.location}%`));
+    if (filters.specialty) conds.push(ilike(vets.specialty, `%${filters.specialty}%`));
+    if (filters.status) conds.push(eq(vets.status, filters.status));
+    const where = conds.length ? and(...conds) : undefined;
 
     return db.select().from(vets).where(where).orderBy(desc(vets.createdAt));
   },
@@ -145,9 +49,29 @@ export const VetsModel = {
     return rows[0] ?? null;
   },
 
-  /** List reviews for vet. */
+  /**
+   * List reviews for vet, with the reviewer's name.
+   *
+   * Joined because the raw rows carry only `user_id`, and a review attributed to
+   * a UUID is not something you can put on a profile screen.
+   */
   async listVetReviews(vetId: string) {
-    return db.select().from(vetReviews).where(eq(vetReviews.vetId, vetId)).orderBy(desc(vetReviews.createdAt));
+    return db
+      .select({
+        id: vetReviews.id,
+        vetId: vetReviews.vetId,
+        userId: vetReviews.userId,
+        rating: vetReviews.rating,
+        comment: vetReviews.comment,
+        createdAt: vetReviews.createdAt,
+        authorFirstName: users.firstName,
+        authorLastName: users.lastName,
+        authorAvatarUrl: users.avatarUrl,
+      })
+      .from(vetReviews)
+      .leftJoin(users, eq(vetReviews.userId, users.id))
+      .where(eq(vetReviews.vetId, vetId))
+      .orderBy(desc(vetReviews.createdAt));
   },
 
   /** List services for vet. */
@@ -158,6 +82,28 @@ export const VetsModel = {
   /** List availability slots for vet. */
   async listVetAvailability(vetId: string) {
     return db.select().from(vetAvailability).where(eq(vetAvailability.vetId, vetId)).orderBy(desc(vetAvailability.createdAt));
+  },
+
+  /**
+   * Appointment times already taken for a vet on one calendar day.
+   *
+   * `appointment_at` is a varchar holding a wall-clock ISO string
+   * (`2026-08-06T10:30:00`), not a timestamp, so a date-prefix match is an exact
+   * day filter with no timezone conversion in the middle. Cancelled slots are
+   * excluded so they free up again.
+   */
+  async bookedAppointmentTimes(vetId: string, date: string) {
+    const rows = await db
+      .select({ appointmentAt: vetAppointments.appointmentAt })
+      .from(vetAppointments)
+      .where(
+        and(
+          eq(vetAppointments.vetId, vetId),
+          ilike(vetAppointments.appointmentAt, `${date}%`),
+          sql`${vetAppointments.status} NOT IN ('cancelled', 'completed')`,
+        ),
+      );
+    return rows.map((r) => r.appointmentAt);
   },
 
   /** Create appointment. */
@@ -261,5 +207,207 @@ export const VetsModel = {
       .set({ refillCount: next, updatedAt: new Date() })
       .where(and(eq(vetPrescriptions.id, prescriptionId), eq(vetPrescriptions.userId, userId)));
     return this.getPrescriptionById(userId, prescriptionId);
+  },
+
+  // ─── Admin ─────────────────────────────────────────────────────────────────
+  // Everything below is reached only through `/vets/admin/*`, which requires the
+  // `vets.read` / `vets.write` permissions. The customer-facing methods above
+  // are all scoped by `userId`; these deliberately are not.
+
+  /** Admin vet list: free-text search across name/specialty/email, plus filters. */
+  async adminListVets(opts: {
+    search?: string;
+    status?: string;
+    specialty?: string;
+    limit: number;
+    offset: number;
+  }) {
+    const conds = [];
+    if (opts.search) {
+      conds.push(
+        or(
+          ilike(vets.fullName, `%${opts.search}%`),
+          ilike(vets.specialty, `%${opts.search}%`),
+          ilike(vets.email, `%${opts.search}%`),
+        ),
+      );
+    }
+    if (opts.status) conds.push(eq(vets.status, opts.status));
+    if (opts.specialty) conds.push(ilike(vets.specialty, `%${opts.specialty}%`));
+    const where = conds.length ? and(...conds) : undefined;
+
+    const [rows, [countRow]] = await Promise.all([
+      db.select().from(vets).where(where).orderBy(desc(vets.createdAt)).limit(opts.limit).offset(opts.offset),
+      db.select({ count: sql<number>`count(*)::int` }).from(vets).where(where),
+    ]);
+
+    return { rows, total: countRow?.count ?? 0 };
+  },
+
+  async createVet(values: Record<string, unknown>) {
+    const rows = await db.insert(vets).values(values as any).returning();
+    return rows[0] ?? null;
+  },
+
+  async updateVet(vetId: string, values: Record<string, unknown>) {
+    const rows = await db
+      .update(vets)
+      .set({ ...values, updatedAt: new Date() })
+      .where(eq(vets.id, vetId))
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  /** Cascades to services, availability, reviews and appointments by FK. */
+  async deleteVet(vetId: string) {
+    await db.delete(vets).where(eq(vets.id, vetId));
+  },
+
+  /**
+   * Review count and appointment tallies for one vet, for the admin detail page.
+   *
+   * Three counts in one round trip rather than three queries; the grouped
+   * appointment counts come back as a status → count map so the caller does not
+   * have to know which statuses exist.
+   */
+  async adminVetStats(vetId: string) {
+    const [reviewRows, appointmentRows] = await Promise.all([
+      db.select({ count: sql<number>`count(*)::int` }).from(vetReviews).where(eq(vetReviews.vetId, vetId)),
+      db
+        .select({ status: vetAppointments.status, count: sql<number>`count(*)::int` })
+        .from(vetAppointments)
+        .where(eq(vetAppointments.vetId, vetId))
+        .groupBy(vetAppointments.status),
+    ]);
+
+    const byStatus = appointmentRows.reduce<Record<string, number>>((acc, r) => {
+      acc[r.status] = Number(r.count);
+      return acc;
+    }, {});
+
+    return {
+      reviewsCount: reviewRows[0]?.count ?? 0,
+      appointmentsByStatus: byStatus,
+      totalAppointments: Object.values(byStatus).reduce((a, b) => a + b, 0),
+    };
+  },
+
+  /**
+   * Admin appointment list across every vet and user.
+   *
+   * Joined rather than bare: the admin table shows pet, owner and vet names, and
+   * three columns of UUIDs would be unreadable. `pets` is a LEFT join because
+   * `pet_id` is nullable and carries no foreign key, so it can point at a pet
+   * that has since been deleted — that appointment must still list.
+   */
+  async adminListAppointments(opts: {
+    vetId?: string;
+    userId?: string;
+    status?: string;
+    type?: string;
+    limit: number;
+    offset: number;
+  }) {
+    const conds = [];
+    if (opts.vetId) conds.push(eq(vetAppointments.vetId, opts.vetId));
+    if (opts.userId) conds.push(eq(vetAppointments.userId, opts.userId));
+    if (opts.status) conds.push(eq(vetAppointments.status, opts.status));
+    if (opts.type) conds.push(eq(vetAppointments.type, opts.type));
+    const where = conds.length ? and(...conds) : undefined;
+
+    const [rows, [countRow]] = await Promise.all([
+      db
+        .select({
+          id: vetAppointments.id,
+          vetId: vetAppointments.vetId,
+          userId: vetAppointments.userId,
+          petId: vetAppointments.petId,
+          type: vetAppointments.type,
+          status: vetAppointments.status,
+          appointmentAt: vetAppointments.appointmentAt,
+          reason: vetAppointments.reason,
+          notes: vetAppointments.notes,
+          followUpAt: vetAppointments.followUpAt,
+          createdAt: vetAppointments.createdAt,
+          vetName: vets.fullName,
+          consultationFee: vets.consultationFee,
+          petName: pets.name,
+          ownerFirstName: users.firstName,
+          ownerLastName: users.lastName,
+          ownerEmail: users.email,
+          ownerPhone: users.phone,
+        })
+        .from(vetAppointments)
+        .leftJoin(vets, eq(vetAppointments.vetId, vets.id))
+        .leftJoin(users, eq(vetAppointments.userId, users.id))
+        .leftJoin(pets, eq(vetAppointments.petId, pets.id))
+        .where(where)
+        .orderBy(desc(vetAppointments.appointmentAt))
+        .limit(opts.limit)
+        .offset(opts.offset),
+      db.select({ count: sql<number>`count(*)::int` }).from(vetAppointments).where(where),
+    ]);
+
+    return { rows, total: countRow?.count ?? 0 };
+  },
+
+  /** Admin appointment update — not scoped to an owner, unlike the customer path. */
+  async adminUpdateAppointment(appointmentId: string, values: Record<string, unknown>) {
+    const rows = await db
+      .update(vetAppointments)
+      .set({ ...values, updatedAt: new Date() })
+      .where(eq(vetAppointments.id, appointmentId))
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  // ─── Availability (admin-managed) ──────────────────────────────────────────
+
+  async getAvailabilityById(availabilityId: string) {
+    const rows = await db.select().from(vetAvailability).where(eq(vetAvailability.id, availabilityId)).limit(1);
+    return rows[0] ?? null;
+  },
+
+  async createAvailability(values: { vetId: string; dayOfWeek: string; startTime: string; endTime: string; mode?: string }) {
+    const rows = await db.insert(vetAvailability).values(values).returning();
+    return rows[0] ?? null;
+  },
+
+  async updateAvailability(availabilityId: string, values: Record<string, unknown>) {
+    const rows = await db
+      .update(vetAvailability)
+      .set({ ...values, updatedAt: new Date() })
+      .where(eq(vetAvailability.id, availabilityId))
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  async deleteAvailability(availabilityId: string) {
+    await db.delete(vetAvailability).where(eq(vetAvailability.id, availabilityId));
+  },
+
+  // ─── Services (admin-managed) ──────────────────────────────────────────────
+
+  async getServiceById(serviceId: string) {
+    const rows = await db.select().from(vetServices).where(eq(vetServices.id, serviceId)).limit(1);
+    return rows[0] ?? null;
+  },
+
+  async createService(values: { vetId: string; name: string; description?: string; fee?: string }) {
+    const rows = await db.insert(vetServices).values(values).returning();
+    return rows[0] ?? null;
+  },
+
+  async updateService(serviceId: string, values: Record<string, unknown>) {
+    const rows = await db
+      .update(vetServices)
+      .set({ ...values, updatedAt: new Date() })
+      .where(eq(vetServices.id, serviceId))
+      .returning();
+    return rows[0] ?? null;
+  },
+
+  async deleteService(serviceId: string) {
+    await db.delete(vetServices).where(eq(vetServices.id, serviceId));
   },
 };
