@@ -4,6 +4,10 @@ import { PetsService } from './service';
 
 export const petsController = new Elysia({ name: 'pets-controller' }).group('/pets', (app) =>
   app
+    /** List all pets across system for admin. */
+    .get('/all', async () => {
+      return PetsService.listAllForAdmin();
+    })
     /** List all pets for authenticated user. */
     .get('', async (ctx: any) => {
       const { headers, jwt } = ctx;

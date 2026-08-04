@@ -1,6 +1,6 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { medicalRecords, petPreferences, pets } from '@/shared/db/schema';
+import { medicalRecords, petPreferences, pets, users } from '@/shared/db/schema';
 
 const parseJsonArray = (value: string | null): string[] => {
   if (!value) return [];
@@ -50,6 +50,30 @@ export const PetsModel = {
   /** List all pets for the authenticated user. */
   async listByUser(userId: string) {
     return db.select().from(pets).where(eq(pets.userId, userId)).orderBy(desc(pets.createdAt));
+  },
+
+  /** List all pets across system for admin panel with owner info. */
+  async listAllForAdmin() {
+    return db
+      .select({
+        id: pets.id,
+        name: pets.name,
+        type: pets.type,
+        breed: pets.breed,
+        gender: pets.gender,
+        dob: pets.dob,
+        weight: pets.weight,
+        photoUrl: pets.photoUrl,
+        createdAt: pets.createdAt,
+        updatedAt: pets.updatedAt,
+        ownerId: users.id,
+        ownerName: sql<string>`${users.firstName} || ' ' || ${users.lastName}`,
+        ownerEmail: users.email,
+        ownerAvatar: users.avatarUrl,
+      })
+      .from(pets)
+      .leftJoin(users, eq(pets.userId, users.id))
+      .orderBy(desc(pets.createdAt));
   },
 
   /** Find user-owned pet by name (case-insensitive, trimmed input). */

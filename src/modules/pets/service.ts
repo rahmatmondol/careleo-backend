@@ -133,6 +133,12 @@ export const PetsService = {
     return { pets: rows };
   },
 
+  /** List all pets across system for admin panel. */
+  async listAllForAdmin() {
+    const rows = await PetsModel.listAllForAdmin();
+    return { pets: rows };
+  },
+
   /** Get single pet. */
   async get(userId: string, petId: string) {
     const row = await PetsModel.getById(userId, petId);
