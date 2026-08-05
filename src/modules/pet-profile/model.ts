@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, like, ne } from 'drizzle-orm';
 import { db } from '@/shared/db';
 import { petFacts, petProfiles } from '@/shared/db/schema';
 
@@ -92,6 +92,32 @@ export const PetProfileModel = {
       })
       .returning();
     return row;
+  },
+
+  /**
+   * Supersede earlier profiling answers to the same question. Onboarding saves
+   * each answer as the user goes, so changing an answer (or coming back later)
+   * must replace the old fact instead of leaving the AI with two contradictory
+   * ones. History is preserved — the old rows are only marked superseded.
+   */
+  supersedePriorProfilingFacts: async (
+    petId: string,
+    question: string,
+    newFactId: string,
+  ): Promise<void> => {
+    const pattern = `${question.replace(/[%_\\]/g, (m) => `\\${m}`)} — %`;
+    await db
+      .update(petFacts)
+      .set({ supersededBy: newFactId })
+      .where(
+        and(
+          eq(petFacts.petId, petId),
+          eq(petFacts.source, 'profiling'),
+          isNull(petFacts.supersededBy),
+          ne(petFacts.id, newFactId),
+          like(petFacts.fact, pattern),
+        ),
+      );
   },
 
   /** Mark an old fact as superseded by a newer one (history preserved). */

@@ -42,11 +42,14 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
     .post('/onboarding/generate-questions', async (ctx: any) => {
       const { body, headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
-      const { petType, breed, estimatedAge, weight } = body as {
+      const { petType, breed, estimatedAge, weight, color, size, petId } = body as {
         petType: string;
         breed?: string;
         estimatedAge?: string;
         weight?: string;
+        color?: string;
+        size?: string;
+        petId?: string;
       };
 
       if (!petType) {
@@ -59,7 +62,20 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
         breed ?? '',
         estimatedAge ?? '',
         weight ?? '',
+        { color, size, petId },
       );
+      return { success: true, data: result, error: null };
+    })
+
+    // ─── Onboarding: closing insights ──────────────────────────────────
+    .post('/onboarding/insights', async (ctx: any) => {
+      const { body, headers, jwt } = ctx;
+      const user = await requireAuth(headers, jwt);
+      const { petId } = (body as { petId?: string }) ?? {};
+      if (!petId) {
+        return { success: false, error: 'petId is required', data: null };
+      }
+      const result = await AiService.generateOnboardingInsights(user.id, petId);
       return { success: true, data: result, error: null };
     })
 
@@ -121,10 +137,26 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
       return { success: true, data: result, error: null };
     })
 
+    // Preview by default: the plan is generated and saved, but no tasks or
+    // reminders exist until the user approves it via /apply below.
     .post('/care-plan/:petId/generate', async (ctx: any) => {
-      const { params, headers, jwt } = ctx;
+      const { params, body, headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
-      const result = await AiService.generateCarePlan(user.id, params.petId);
+      const { apply } = (body as { apply?: boolean }) ?? {};
+      const result = await AiService.generateCarePlan(user.id, params.petId, { apply: Boolean(apply) });
+      return { success: true, data: result, error: null };
+    })
+
+    // Turn the (possibly edited) plan into real tasks + reminders.
+    .post('/care-plan/:petId/apply', async (ctx: any) => {
+      const { params, body, headers, jwt } = ctx;
+      const user = await requireAuth(headers, jwt);
+      const plan = (body as { plan?: any; daily_schedule?: any[]; upcoming_vaccines?: any[] }) ?? {};
+      const payload = plan.plan ?? plan;
+      if (!Array.isArray(payload.daily_schedule)) {
+        return { success: false, error: 'daily_schedule is required', data: null };
+      }
+      const result = await AiService.applyCarePlan(user.id, params.petId, payload);
       return { success: true, data: result, error: null };
     })
 

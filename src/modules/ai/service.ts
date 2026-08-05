@@ -3,12 +3,17 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { AiModel } from './model';
 import { analyzePetImage, type PetVisionResult } from './vision';
-import { CarePlanService } from './care-plan';
+import { CarePlanService, type CarePlan } from './care-plan';
 import { AI_TOOL_DECLARATIONS, executeTool } from './tools';
 import { ValidationError } from '@/shared/errors';
 import { PetProfileModel } from '@/modules/pet-profile/model';
 import { PetProfileService } from '@/modules/pet-profile/service';
-import { CORE_PROFILING_QUESTIONS, CORE_QUESTION_IDS } from './profiling-questions';
+import {
+  getEssentialQuestions,
+  getDeferredQuestions,
+  getCoreQuestionIds,
+  type ProfilingQuestion,
+} from './profiling-questions';
 import {
   getModelForPurpose,
   checkUserTokenLimit,
@@ -58,6 +63,120 @@ function buildAnthropicClient(resolved: ResolvedModel): Anthropic {
 function parseJson(text: string) {
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   return JSON.parse(cleaned);
+}
+
+/**
+ * One-shot text generation that honours the resolved provider instead of
+ * assuming Gemini. Returns the text plus usage so callers can record tokens.
+ */
+async function generateText(
+  resolved: ResolvedModel,
+  prompt: string,
+  maxTokens = 2048,
+): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  if (resolved.provider === 'openai' || resolved.provider === 'deepseek' || resolved.provider === 'openai_custom') {
+    const client = buildOpenAIClient(resolved);
+    const res = await client.chat.completions.create({
+      model: resolved.modelName,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: maxTokens,
+    });
+    return {
+      text: res.choices[0]?.message?.content ?? '',
+      inputTokens: res.usage?.prompt_tokens ?? 0,
+      outputTokens: res.usage?.completion_tokens ?? 0,
+    };
+  }
+
+  if (resolved.provider === 'anthropic' || resolved.provider === 'anthropic_custom') {
+    const client = buildAnthropicClient(resolved);
+    const res = await client.messages.create({
+      model: resolved.modelName,
+      max_tokens: maxTokens,
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    return {
+      text,
+      inputTokens: res.usage?.input_tokens ?? 0,
+      outputTokens: res.usage?.output_tokens ?? 0,
+    };
+  }
+
+  const genAI = new GoogleGenerativeAI(resolved.apiKey);
+  const model = genAI.getGenerativeModel({ model: resolved.modelName });
+  const result = await model.generateContent(prompt);
+  const usage = result.response.usageMetadata;
+  return {
+    text: result.response.text() ?? '',
+    inputTokens: usage?.promptTokenCount ?? 0,
+    outputTokens: usage?.candidatesTokenCount ?? 0,
+  };
+}
+
+// ─── Onboarding question cache ───────────────────────────────────────────────
+// Breed-specific questions are identical for every "3-year-old Beagle", so
+// regenerating them per signup is pure latency + tokens. Keyed by species,
+// breed and age bucket; process-local and short-lived by design.
+
+const ONBOARDING_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const ONBOARDING_CACHE_MAX = 200;
+const onboardingQuestionCache = new Map<string, { questions: any[]; expiresAt: number }>();
+
+/** Normalises "6 months" / "adult (1-5 years)" / "3" into a coarse life stage. */
+function ageBucket(age?: string): string {
+  const raw = (age ?? '').toLowerCase().trim();
+  if (!raw) return 'unknown';
+  if (raw.includes('senior') || raw.includes('old')) return 'senior';
+  if (raw.includes('puppy') || raw.includes('kitten') || raw.includes('baby')) return 'baby';
+
+  const num = parseFloat(raw.replace(/[^0-9.]/g, ''));
+  if (!Number.isFinite(num)) {
+    if (raw.includes('young')) return 'baby';
+    if (raw.includes('adult')) return 'adult';
+    return 'unknown';
+  }
+  const years = /week|day/.test(raw) ? num / 52 : /month|\bmo\b/.test(raw) ? num / 12 : num;
+  if (years < 1) return 'baby';
+  if (years < 3) return 'young';
+  if (years < 8) return 'adult';
+  return 'senior';
+}
+
+function readOnboardingCache(key: string): any[] | null {
+  const hit = onboardingQuestionCache.get(key);
+  if (!hit) return null;
+  if (hit.expiresAt < Date.now()) {
+    onboardingQuestionCache.delete(key);
+    return null;
+  }
+  return hit.questions;
+}
+
+function writeOnboardingCache(key: string, questions: any[]) {
+  if (onboardingQuestionCache.size >= ONBOARDING_CACHE_MAX) {
+    const oldest = onboardingQuestionCache.keys().next().value;
+    if (oldest) onboardingQuestionCache.delete(oldest);
+  }
+  onboardingQuestionCache.set(key, { questions, expiresAt: Date.now() + ONBOARDING_CACHE_TTL_MS });
+}
+
+/** Diet brand already used by another pet of the same owner — a good default. */
+async function findKnownDietBrand(userId: string, excludePetId?: string): Promise<string | null> {
+  try {
+    const pets = await AiModel.getUserPets(userId);
+    for (const pet of pets.slice(0, 4)) {
+      if (excludePetId && pet.id === excludePetId) continue;
+      const profile = await PetProfileModel.getProfile(pet.id);
+      if (profile?.dietBrand) return profile.dietBrand;
+    }
+  } catch {
+    // Best-effort context only.
+  }
+  return null;
 }
 
 // ─── Context builder for chat system prompt ───────────────────────────────
@@ -164,77 +283,187 @@ export const AiService = {
 
   // ─── Onboarding: Generate dynamic questions ────────────────────────────
 
+  /**
+   * Onboarding questions for a freshly added pet.
+   *
+   * Returns two lists: `questions` is what the app asks right now — the four
+   * species-appropriate essentials plus at most ONE breed-specific question
+   * from the AI — and `deferredQuestions` is everything else, for the profile
+   * screen later. Keeping onboarding at five taps is deliberate; the old flow
+   * asked 12–14 and users dropped out mid-way.
+   */
   async generateOnboardingQuestions(
     userId: string,
     petType: string,
     breed: string,
     estimatedAge: string,
     weight?: string,
+    extraContext?: { color?: string; size?: string; petId?: string },
   ) {
     const limitCheck = await checkUserTokenLimit(userId);
     if (!limitCheck.allowed) throw new ValidationError(limitCheck.reason ?? 'Token limit reached');
 
-    const resolved = await getModelForPurpose('onboarding');
-    const genAI = new GoogleGenerativeAI(resolved.apiKey);
-    const model = genAI.getGenerativeModel({ model: resolved.modelName });
+    const essential = getEssentialQuestions(petType);
+    const deferred = getDeferredQuestions(petType);
+    const knownIds = getCoreQuestionIds(petType);
 
-    const prompt = `You are a veterinary expert. Generate a JSON array of onboarding questions for a new pet owner.
+    // Breed questions are the same for every "3-year-old Beagle" — reuse them.
+    const cacheKey = `${(petType || 'unknown').toLowerCase()}|${(breed || 'unknown').toLowerCase()}|${ageBucket(estimatedAge)}`;
+    let extras = readOnboardingCache(cacheKey);
+
+    if (!extras) {
+      const knownBrand = await findKnownDietBrand(userId, extraContext?.petId);
+      const prompt = `You are a veterinary expert designing a mobile onboarding form for a new pet owner.
 
 Pet details:
-- Type: ${petType}
+- Species: ${petType}
 - Breed: ${breed || 'Unknown'}
-- Estimated age: ${estimatedAge || 'Unknown'}
+- Age: ${estimatedAge || 'Unknown'}
 - Weight: ${weight || 'Unknown'}
+- Coat/colour: ${extraContext?.color || 'Unknown'}
+- Size: ${extraContext?.size || 'Unknown'}
+${knownBrand ? `- The owner already feeds another pet "${knownBrand}" — you may use it as a likely option.\n` : ''}
+Generate 3-5 questions that are:
+1. Highly SPECIFIC to this species, breed, age stage and size — breed-typical health risks, age-stage needs, size-appropriate care. A generic question that would suit any pet is a failure.
+2. NOT about anything already asked. These ids are already covered, do not repeat them or ask the same thing under a different name: ${knownIds.join(', ')}.
+3. Fast to answer on a phone: prefer "single_choice" or "multi_select" with 3-5 short options. AT MOST ONE question may be free "text", and only if choices genuinely cannot capture it.
+4. Ordered easiest first; anything sensitive (illness, cost, past trauma) last.
+5. Friendly and plain — no jargon.
 
-Generate 4-6 questions that are:
-1. Highly SPECIFIC to this species, breed, age, and weight (e.g. breed-typical health risks, weight-appropriate diet, age-stage needs)
-2. NOT about these already-covered basics (do not repeat these — they are asked separately): diet brand, daily food amount, allergies, health conditions, medications, vaccination status, general activity level
-3. Written in a friendly, conversational tone
+Each question also gets an "importance" from 1-5: how much a vet would want this answered on day one. Exactly one question should be a 5.
 
 Return a JSON array with this exact structure:
 [
   {
-    "id": "unique_key",
-    "title": "Section Title",
+    "id": "unique_snake_case_key",
+    "title": "Short section title (1-2 words)",
     "question": "The question text",
     "type": "single_choice" | "multi_select" | "numeric" | "text",
     "unit": "kg" or "cups" etc (only for numeric type),
-    "options": ["Option 1", "Option 2"] (only for choice types),
+    "options": ["Option 1", "Option 2"] (required for choice types, 3-5 items),
     "required": true | false,
-    "tip": "Optional helpful tip specific to this breed"
+    "importance": 1-5,
+    "category": "diet" | "health" | "activity" | "behavior" | "preference" | "other",
+    "tip": "Optional one-line tip specific to this breed"
   }
 ]
 
-Return ONLY valid JSON array. No markdown, no extra text.`;
+Return ONLY the valid JSON array. No markdown, no extra text.`;
 
-    // Hybrid: fixed core questions are always returned (guaranteed coverage).
-    // The AI's breed/species-specific extras are added on top — but if the AI
-    // call fails (quota, network, bad JSON), we still return the core set so
-    // onboarding never breaks.
-    let extras: any[] = [];
-    try {
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      const usageMetadata = result.response.usageMetadata;
+      // If the AI call fails (quota, network, bad JSON) onboarding still works:
+      // the species core set is always returned.
+      try {
+        const resolved = await getModelForPurpose('onboarding');
+        const { text, inputTokens, outputTokens } = await generateText(resolved, prompt);
 
-      await recordTokenUsage({
-        userId,
-        model: resolved,
-        feature: 'onboarding',
-        inputTokens: usageMetadata?.promptTokenCount ?? 300,
-        outputTokens: usageMetadata?.candidatesTokenCount ?? 500,
-      });
+        await recordTokenUsage({
+          userId,
+          model: resolved,
+          feature: 'onboarding',
+          inputTokens: inputTokens || 300,
+          outputTokens: outputTokens || 500,
+        });
 
-      const aiQuestions = parseJson(text);
-      extras = Array.isArray(aiQuestions)
-        ? aiQuestions.filter((q: any) => q?.id && !CORE_QUESTION_IDS.includes(q.id))
-        : [];
-    } catch (e: any) {
-      console.warn('[generateOnboardingQuestions] AI generation failed, using core only:', e?.message ?? e);
+        const aiQuestions = parseJson(text);
+        extras = Array.isArray(aiQuestions)
+          ? aiQuestions
+              .filter((q: any) => q?.id && q?.question && !knownIds.includes(q.id))
+              .map((q: any) => ({
+                ...q,
+                // Choice questions without options would render as an empty list.
+                type: (q.type === 'single_choice' || q.type === 'multi_select') && !q.options?.length ? 'text' : q.type,
+                required: q.required !== false,
+                category: q.category ?? 'other',
+              }))
+              .sort((a: any, b: any) => (b.importance ?? 0) - (a.importance ?? 0))
+          : [];
+        writeOnboardingCache(cacheKey, extras);
+      } catch (e: any) {
+        console.warn('[generateOnboardingQuestions] AI generation failed, using core only:', e?.message ?? e);
+        extras = [];
+      }
     }
 
-    const questions = [...CORE_PROFILING_QUESTIONS, ...extras];
-    return { questions, aiGenerated: extras.length > 0 };
+    // The single most useful AI question joins onboarding; the rest wait.
+    const [topExtra, ...restExtras] = extras;
+    const questions: ProfilingQuestion[] = [
+      ...essential,
+      ...(topExtra ? [{ ...topExtra, stage: 'essential' as const, required: false }] : []),
+    ];
+    const deferredQuestions = [
+      ...deferred,
+      ...restExtras.map((q: any) => ({ ...q, stage: 'deferred' as const })),
+    ];
+
+    return { questions, deferredQuestions, aiGenerated: extras.length > 0 };
+  },
+
+  // ─── Onboarding: closing insights ─────────────────────────────────────
+
+  /**
+   * Three short, specific insights shown at the end of onboarding, so the
+   * questions the owner just answered visibly pay off. Never throws — falls
+   * back to profile-derived lines when the model is unavailable.
+   */
+  async generateOnboardingInsights(userId: string, petId: string) {
+    const pets = await AiModel.getUserPets(userId);
+    const pet = pets.find((p) => p.id === petId);
+    if (!pet) throw new ValidationError('Pet not found');
+
+    const profile = await PetProfileModel.getProfile(petId);
+    const facts = await PetProfileModel.listFacts(petId, { activeOnly: true, limit: 15 });
+
+    const fallback = [
+      `I’ll keep track of ${pet.name}’s routine and remind you before anything is due.`,
+      profile?.vaccinationStatus && profile.vaccinationStatus !== 'Up to date'
+        ? `${pet.name}’s vaccinations need attention — ask me to find a vet nearby any time.`
+        : `Ask me anything about ${pet.name}’s food, behaviour or health — I already know the basics.`,
+      `Tell me when something changes and I’ll remember it for next time.`,
+    ];
+
+    try {
+      const known = [
+        profile?.dietType ? `Diet: ${profile.dietType}` : '',
+        profile?.dietBrand ? `Brand: ${profile.dietBrand}` : '',
+        profile?.activityLevel ? `Activity: ${profile.activityLevel}` : '',
+        profile?.allergies?.length ? `Allergies: ${profile.allergies.join(', ')}` : '',
+        profile?.healthConditions?.length ? `Conditions: ${profile.healthConditions.join(', ')}` : '',
+        profile?.vaccinationStatus ? `Vaccination: ${profile.vaccinationStatus}` : '',
+        ...facts.map((f) => `- ${f.fact}`),
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const prompt = `You are a veterinarian writing the first thing a new CareLeo user reads about their pet.
+
+Pet: ${pet.name}, a ${pet.type}${pet.breed ? ` (${pet.breed})` : ''}${pet.dob ? `, born ${pet.dob}` : ''}.
+What the owner just told us:
+${known || '(nothing beyond the basics)'}
+
+Write exactly 3 insights, each one sentence, each SPECIFIC to this pet's breed, age or what the owner said — no generic pet advice. At least one must be something actionable CareLeo will help with (a reminder, a check, a booking). Warm and plain, no jargon, no emoji at the start.
+
+Return ONLY a JSON array of 3 strings.`;
+
+      const resolved = await getModelForPurpose('onboarding');
+      const { text, inputTokens, outputTokens } = await generateText(resolved, prompt, 512);
+      await recordTokenUsage({
+        userId,
+        petId,
+        model: resolved,
+        feature: 'onboarding_insights',
+        inputTokens: inputTokens || 300,
+        outputTokens: outputTokens || 150,
+      });
+
+      const parsed = parseJson(text);
+      const insights = Array.isArray(parsed)
+        ? parsed.map((i) => String(i).trim()).filter(Boolean).slice(0, 3)
+        : [];
+      return { insights: insights.length === 3 ? insights : fallback, aiGenerated: insights.length === 3 };
+    } catch (e: any) {
+      console.warn('[generateOnboardingInsights] failed, using fallback:', e?.message ?? e);
+      return { insights: fallback, aiGenerated: false };
+    }
   },
 
   // ─── Chat Session Management ────────────────────────────────────────────
@@ -533,9 +762,19 @@ TASK: Write ONE proactive daily check-in opening message to the pet owner, as if
 
   // ─── Care Plan ──────────────────────────────────────────────────────────
 
-  async generateCarePlan(userId: string, petId: string) {
-    const carePlan = await CarePlanService.generate(userId, petId);
-    return { success: true, carePlan };
+  /**
+   * Preview by default — the app shows the plan for review before anything is
+   * created. Pass `apply` to create tasks/reminders in the same call.
+   */
+  async generateCarePlan(userId: string, petId: string, opts: { apply?: boolean } = {}) {
+    const carePlan = await CarePlanService.generate(userId, petId, opts);
+    return { success: true, carePlan, applied: Boolean(opts.apply) };
+  },
+
+  /** Create tasks + reminders from the plan the user approved. */
+  async applyCarePlan(userId: string, petId: string, plan: Partial<CarePlan>) {
+    const result = await CarePlanService.apply(userId, petId, plan);
+    return { success: true, ...result };
   },
 
   async getCarePlan(petId: string) {

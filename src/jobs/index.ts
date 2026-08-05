@@ -5,6 +5,7 @@
  */
 
 import { runTaskCheckerJob } from './task-checker.job';
+import { runTaskRecurrenceJob } from './task-recurrence.job';
 import { runAiNudgeJob } from './ai-nudge.job';
 import { runDailyCheckinJob } from './daily-checkin.job';
 import { runLowStockJob } from './low-stock.job';
@@ -16,12 +17,14 @@ const AI_NUDGE_INTERVAL_MS     = 2 * 60 * 60 * 1000; // 2 hours
 const DAILY_CHECKIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const LOW_STOCK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const VACCINE_DUE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const TASK_RECURRENCE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 let taskCheckerTimer: ReturnType<typeof setInterval> | null = null;
 let aiNudgeTimer: ReturnType<typeof setInterval> | null = null;
 let dailyCheckinTimer: ReturnType<typeof setInterval> | null = null;
 let lowStockTimer: ReturnType<typeof setInterval> | null = null;
 let vaccineDueTimer: ReturnType<typeof setInterval> | null = null;
+let taskRecurrenceTimer: ReturnType<typeof setInterval> | null = null;
 let subscriptionTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startJobs() {
@@ -91,6 +94,24 @@ export function startJobs() {
     }
   }, VACCINE_DUE_INTERVAL_MS);
 
+  // Recurring tasks: roll missed daily/weekly items to their next slot so a
+  // care plan keeps running instead of dying on the first missed day. Runs on
+  // startup too — a restart after downtime should catch the schedule up.
+  runTaskRecurrenceJob()
+    .then((r) => console.log('[Jobs] task-recurrence initial run:', r))
+    .catch((e) => console.error('[Jobs] task-recurrence error:', e));
+
+  taskRecurrenceTimer = setInterval(async () => {
+    try {
+      const result = await runTaskRecurrenceJob();
+      if (result.rolled > 0) {
+        console.log(`[Jobs] task-recurrence: rolled ${result.rolled} of ${result.checked} recurring tasks`);
+      }
+    } catch (err) {
+      console.error('[Jobs] task-recurrence error:', err);
+    }
+  }, TASK_RECURRENCE_INTERVAL_MS);
+
   /**
    * "Subscribe & save" recurring orders.
    *
@@ -111,6 +132,7 @@ export function stopJobs() {
   if (dailyCheckinTimer) clearInterval(dailyCheckinTimer);
   if (lowStockTimer) clearInterval(lowStockTimer);
   if (vaccineDueTimer) clearInterval(vaccineDueTimer);
+  if (taskRecurrenceTimer) clearInterval(taskRecurrenceTimer);
   if (subscriptionTimer) clearInterval(subscriptionTimer);
   console.log('[Jobs] Background jobs stopped.');
 }

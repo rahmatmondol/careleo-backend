@@ -2,6 +2,7 @@ import { Elysia } from 'elysia';
 import { AdminService } from './service';
 import { AdminAiService } from './ai-service';
 import { requireAuth, requirePermission } from '@/shared/auth/guards';
+import { NotFoundError } from '@/shared/errors';
 import { getProviderCatalog } from '@/modules/ai/provider-catalog';
 
 export const adminController = new Elysia({ name: 'admin-controller' }).group('/admin', (app) =>
@@ -10,7 +11,8 @@ export const adminController = new Elysia({ name: 'admin-controller' }).group('/
       const { headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
       requirePermission(user, 'orders.read');
-      return AdminService.ping();
+      const data = await AdminService.getDashboardSummary();
+      return { success: true, data, error: null };
     })
 
     .get('/orders', async (ctx: any) => {
@@ -18,6 +20,37 @@ export const adminController = new Elysia({ name: 'admin-controller' }).group('/
       const user = await requireAuth(headers, jwt);
       requirePermission(user, 'orders.read');
       return AdminService.ping();
+    })
+
+    // ─── Customers ─────────────────────────────────────────────────────
+    .get('/users', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'users.read');
+      const data = await AdminService.listUsers(ctx.query ?? {});
+      return { success: true, data, error: null };
+    })
+
+    .get('/users/:id', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'users.read');
+      const data = await AdminService.getUser(String(ctx.params.id));
+      if (!data) throw new NotFoundError('User not found');
+      return { success: true, data, error: null };
+    })
+
+    // ─── Subscribers (plan management lives in adminSubscriptionsController) ──
+    .get('/subscriptions', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'plans.manage');
+      const data = await AdminService.listSubscriptions(ctx.query ?? {});
+      return { success: true, data, error: null };
+    })
+
+    .get('/subscriptions/analytics', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'plans.manage');
+      const data = await AdminService.getSubscriptionAnalytics();
+      return { success: true, data, error: null };
     })
 
     // ─── Admin AI: Token Usage ─────────────────────────────────────────

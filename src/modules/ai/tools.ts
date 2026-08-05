@@ -497,10 +497,13 @@ export async function executeTool(
       }
 
       case 'regenerate_care_plan': {
-        const plan = await CarePlanService.generate(userId, args.petId);
+        // Asked for in conversation, so it applies straight away — unlike the
+        // app's onboarding flow, which previews the plan for review first.
+        const plan = await CarePlanService.generate(userId, args.petId, { apply: true });
         return JSON.stringify({
           success: true,
-          message: 'Care plan regenerated with latest pet data',
+          message: 'Care plan regenerated with latest pet data, and its tasks were scheduled',
+          scheduleItems: (plan.daily_schedule ?? []).length,
           healthAlerts: plan.health_alerts,
         });
       }

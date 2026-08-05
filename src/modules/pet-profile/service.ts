@@ -76,16 +76,21 @@ export const PetProfileService = {
     const FIELD_MAP: Record<string, keyof PetProfileRow> = {
       diet_brand: 'dietBrand',
       food_brand: 'dietBrand',
+      brand: 'dietBrand',
       diet: 'dietType',
       diet_type: 'dietType',
+      food: 'dietType',
+      food_type: 'dietType',
       daily_amount: 'dailyAmount',
       amount: 'dailyAmount',
       activity: 'activityLevel',
       activity_level: 'activityLevel',
       vaccination: 'vaccinationStatus',
+      vaccination_status: 'vaccinationStatus',
       vaccines: 'vaccinationStatus',
       grooming: 'groomingNotes',
       behavior: 'behaviorNotes',
+      behaviour: 'behaviorNotes',
     };
     const ARRAY_MAP: Record<string, keyof PetProfileRow> = {
       allergies: 'allergies',
@@ -96,6 +101,18 @@ export const PetProfileService = {
       medications: 'medications',
       medication: 'medications',
     };
+
+    /**
+     * Multi-select answers arrive either as a real array or (from older
+     * clients) as a comma-joined string. Either way the profile column stores
+     * one entry per value, and "no answer" markers are dropped so an empty
+     * allergy list means exactly that.
+     */
+    const NON_ANSWERS = new Set(['none', 'not sure', 'no', 'n/a', 'nothing', 'unknown']);
+    const toArray = (value: unknown, joined: string): string[] =>
+      (Array.isArray(value) ? value.map((v) => String(v)) : joined.split(','))
+        .map((v) => v.trim())
+        .filter((v) => v !== '' && !NON_ANSWERS.has(v.toLowerCase()));
 
     const patch: Partial<PetProfileRow> = {};
     let freeformNote = '';
@@ -113,20 +130,23 @@ export const PetProfileService = {
       }
 
       if (ARRAY_MAP[key]) {
-        const field = ARRAY_MAP[key];
-        const arr = Array.isArray(a.answer) ? a.answer.map((x) => String(x)) : [answerStr];
-        (patch as any)[field] = arr;
+        (patch as any)[ARRAY_MAP[key]] = toArray(a.answer, answerStr);
       } else if (FIELD_MAP[key]) {
         (patch as any)[FIELD_MAP[key]] = answerStr;
       }
 
-      // Always record the answer as a profiling fact.
-      await PetProfileModel.addFact({
+      // Always record the answer as a profiling fact. Onboarding saves answers
+      // step by step, so a re-answer supersedes the earlier one for the same
+      // question rather than piling up contradictions.
+      const fact = await PetProfileModel.addFact({
         petId,
         fact: a.question ? `${a.question} — ${answerStr}` : answerStr,
         category: VALID_CATEGORIES.includes(a.category ?? '') ? a.category : 'other',
         source: 'profiling',
       });
+      if (a.question) {
+        await PetProfileModel.supersedePriorProfilingFacts(petId, a.question, fact.id);
+      }
     }
 
     if (Object.keys(patch).length > 0) {
