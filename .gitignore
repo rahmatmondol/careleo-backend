@@ -3,3 +3,8 @@
 !.env.example
 node_modules/
 uploads/
+
+# Firebase / Service Account Secrets
+*-firebase-adminsdk-*.json
+*.pem
+*.key
