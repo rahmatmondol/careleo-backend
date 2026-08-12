@@ -1,6 +1,16 @@
-import { and, desc, eq, gte, ilike, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, lt, or, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { orders, pets, users, userSubscriptions, subscriptionPlans } from '@/shared/db/schema';
+import {
+  orderItems,
+  orders,
+  pets,
+  productSubscriptions,
+  products,
+  subscriptionPlans,
+  tasks,
+  users,
+  userSubscriptions,
+} from '@/shared/db/schema';
 
 /**
  * Orders that never became money. Excluded everywhere revenue is summed, so
@@ -239,13 +249,17 @@ export const AdminModel = {
     };
   },
 
-  /** One customer with their pets, recent orders and current plan. */
+  /**
+   * One customer with everything the admin panel's user page shows: their pets
+   * and the tasks logged against them, recent orders down to the line item, the
+   * current plan, and the recurring product deliveries still to come.
+   */
   async getUser(id: string) {
     const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
     const user = rows[0];
     if (!user) return null;
 
-    const [userPets, userOrders, subscription] = await Promise.all([
+    const [userPets, userOrders, subscription, upcomingDeliveries] = await Promise.all([
       db.select().from(pets).where(eq(pets.userId, id)).orderBy(desc(pets.createdAt)),
       db
         .select({
@@ -253,6 +267,7 @@ export const AdminModel = {
           amount: orders.totalAmount,
           status: orders.status,
           paymentStatus: orders.paymentStatus,
+          paymentMethod: orders.paymentMethod,
           source: orders.source,
           createdAt: orders.createdAt,
         })
@@ -275,15 +290,93 @@ export const AdminModel = {
         .where(eq(userSubscriptions.userId, id))
         .orderBy(desc(userSubscriptions.createdAt))
         .limit(1),
+
+      // Recurring product deliveries — the "next 30 days" list on the user page
+      // comes from here, so cancelled subscriptions are left out.
+      db
+        .select({
+          id: productSubscriptions.id,
+          productId: productSubscriptions.productId,
+          productName: products.name,
+          imageUrl: products.imageUrl,
+          quantity: productSubscriptions.quantity,
+          frequencyDays: productSubscriptions.frequencyDays,
+          nextOrderDate: productSubscriptions.nextOrderDate,
+          lastOrderedAt: productSubscriptions.lastOrderedAt,
+        })
+        .from(productSubscriptions)
+        .innerJoin(products, eq(productSubscriptions.productId, products.id))
+        .where(and(eq(productSubscriptions.userId, id), eq(productSubscriptions.isActive, true)))
+        .orderBy(productSubscriptions.nextOrderDate),
     ]);
+
+    const orderIds = userOrders.map((o) => o.id);
+    const petIds = userPets.map((p) => p.id);
+
+    const [lineItems, petTasks] = await Promise.all([
+      orderIds.length
+        ? db
+            .select({
+              id: orderItems.id,
+              orderId: orderItems.orderId,
+              productId: orderItems.productId,
+              // Line items keep their own name/price snapshot; only the image is
+              // looked up, and it is gone once the product is deleted.
+              name: orderItems.productName,
+              quantity: orderItems.quantity,
+              price: orderItems.price,
+              imageUrl: products.imageUrl,
+            })
+            .from(orderItems)
+            .leftJoin(products, eq(products.id, orderItems.productId))
+            .where(inArray(orderItems.orderId, orderIds))
+        : Promise.resolve([] as any[]),
+
+      petIds.length
+        ? db
+            .select({
+              id: tasks.id,
+              petId: tasks.petId,
+              title: tasks.title,
+              taskType: tasks.taskType,
+              frequency: tasks.frequency,
+              dueDate: tasks.dueDate,
+              notes: tasks.notes,
+              isCompleted: tasks.isCompleted,
+            })
+            .from(tasks)
+            .where(inArray(tasks.petId, petIds))
+            .orderBy(desc(tasks.dueDate))
+            .limit(200)
+        : Promise.resolve([] as any[]),
+    ]);
+
+    const itemsByOrder = new Map<string, any[]>();
+    for (const item of lineItems) {
+      const bucket = itemsByOrder.get(item.orderId) ?? [];
+      bucket.push({ ...item, price: Number(item.price ?? 0), quantity: Number(item.quantity ?? 1) });
+      itemsByOrder.set(item.orderId, bucket);
+    }
+
+    const tasksByPet = new Map<string, any[]>();
+    for (const task of petTasks) {
+      const bucket = tasksByPet.get(task.petId) ?? [];
+      bucket.push(task);
+      tasksByPet.set(task.petId, bucket);
+    }
 
     const { passwordHash: _passwordHash, ...safeUser } = user as any;
 
     return {
       user: { ...safeUser, name: `${user.firstName} ${user.lastName}`.trim() },
-      pets: userPets,
-      orders: userOrders.map((o) => ({ ...o, amount: Number(o.amount ?? 0) })),
+      pets: userPets.map((p) => ({ ...p, tasks: tasksByPet.get(p.id) ?? [] })),
+      orders: userOrders.map((o) => ({
+        ...o,
+        amount: Number(o.amount ?? 0),
+        items: itemsByOrder.get(o.id) ?? [],
+      })),
       subscription: subscription[0] ?? null,
+      upcomingDeliveries,
       totals: {
         pets: userPets.length,
         orders: userOrders.length,
