@@ -93,6 +93,19 @@ const CAREGIVER_ALERT_MIN = 120;
 const ALARM_AFTER_MIN = 30;
 const ALARM_DISMISSAL_LIMIT = 2;
 
+/**
+ * How late an alarm may still be raised after its moment has passed.
+ *
+ * The moment can be missed for ordinary reasons — the server was restarted,
+ * the task was created already overdue, the owner switched the alarm on after
+ * the fact. Skipping those meant the alarm silently never fired, which is the
+ * one failure a feature like this cannot have.
+ *
+ * Bounded, though: waking someone at 3am over a dose missed yesterday morning
+ * helps nobody, and the task list is the right place to find that out.
+ */
+const ALARM_LATE_GRACE_MS = 6 * 60 * 60 * 1000;
+
 const bucketStartOf = (due: Date) => Math.floor(due.getTime() / DIGEST_BUCKET_MS) * DIGEST_BUCKET_MS;
 
 const digestJobId = (userId: string, bucketStart: number) => `task_digest-${userId}-${bucketStart}`;
@@ -172,8 +185,21 @@ const refreshTaskBucket = async (userId: string, bucketStart: number) => {
       continue;
     }
     const at = task.dueDate.getTime() + ALARM_AFTER_MIN * 60_000;
-    if (at <= Date.now()) continue;
-    await upsertJob(alarmJobId(task.id), 'task_alarm', { taskId: task.id }, at - Date.now());
+    const late = Date.now() - at;
+
+    // Already past its moment: raise it now if it is still recent enough to be
+    // worth acting on, rather than dropping it entirely.
+    if (late > ALARM_LATE_GRACE_MS) {
+      await removeJob(alarmJobId(task.id));
+      continue;
+    }
+
+    await upsertJob(
+      alarmJobId(task.id),
+      'task_alarm',
+      { taskId: task.id },
+      late > 0 ? 5_000 : at - Date.now(),
+    );
   }
 
   // Fire when the *last* task in the slot is actually due, so nothing is
