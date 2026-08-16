@@ -1,0 +1,1 @@
+ALTER TABLE "products" ADD COLUMN "subscription_included" boolean DEFAULT false NOT NULL;

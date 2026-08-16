@@ -86,6 +86,7 @@ const buildValues = (b: any) => {
   if (b.status !== undefined) values.status = b.status || 'Draft';
   if (b.supplier !== undefined) values.supplier = b.supplier || null;
   if (b.source !== undefined) values.source = b.source || null;
+  if (b.subscriptionIncluded !== undefined) values.subscriptionIncluded = !!b.subscriptionIncluded;
   if (b.excludeFromSubscription !== undefined) values.excludeFromSubscription = !!b.excludeFromSubscription;
   if (b.tags !== undefined) values.tags = stringifyMaybe(b.tags);
   if (b.attributes !== undefined) values.attributes = stringifyMaybe(b.attributes);

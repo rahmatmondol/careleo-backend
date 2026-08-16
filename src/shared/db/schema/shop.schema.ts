@@ -124,6 +124,21 @@ export const products = pgTable(
     status: varchar('status', { length: 30 }).default('Draft'),
     supplier: varchar('supplier', { length: 200 }),
     source: varchar('source', { length: 200 }),
+    /**
+     * Whether this product can ever be paid for by a subscription benefit.
+     *
+     * Opt-in (defaults to false) so a new product is ordinary paid stock until
+     * someone says otherwise. A plan's `plan_coverage_rules` then decide which
+     * of these flagged products *that* plan actually covers — both must agree
+     * before a cart line is covered.
+     */
+    subscriptionIncluded: boolean('subscription_included').default(false).notNull(),
+    /**
+     * @deprecated Superseded by `subscriptionIncluded`, which says the same
+     * thing without the double negative. Nothing reads this any more — despite
+     * the admin UI's old note, the recurring-order runner never did. Kept so
+     * the column (and its data) survives; drop it in a later migration.
+     */
     excludeFromSubscription: boolean('exclude_from_subscription').default(false),
     tags: text('tags'),
     attributes: text('attributes'),
@@ -234,7 +249,29 @@ export const orders = pgTable(
       .notNull()
       .references(() => users.id),
     totalAmount: decimal('total_amount', { precision: 10, scale: 2 }).notNull(),
+    /**
+     * Money breakdown. `totalAmount` stays the full value of the goods (what
+     * every existing report already sums); `coveredAmount` is the part the
+     * user's subscription paid for and `payableAmount` is what they owe.
+     * Invariant: subtotal = coveredAmount + payableAmount = totalAmount.
+     */
+    subtotal: decimal('subtotal', { precision: 10, scale: 2 }).default('0').notNull(),
+    coveredAmount: decimal('covered_amount', { precision: 10, scale: 2 }).default('0').notNull(),
+    payableAmount: decimal('payable_amount', { precision: 10, scale: 2 }).default('0').notNull(),
+    /**
+     * Which benefit period the coverage was drawn from, and the per-rule units
+     * it consumed. Cancelling the order credits *this* period back rather than
+     * whatever period happens to be current when the cancellation arrives.
+     */
+    benefitPeriodStart: timestamp('benefit_period_start', { withTimezone: true }),
+    coverageMetaJson: text('coverage_meta_json'),
     status: varchar('status', { length: 50 }).default('PENDING').notNull(),
+    /**
+     * Which saved address was chosen, and a frozen copy of it. Both are kept
+     * on purpose: editing or deleting a saved address must never rewrite where
+     * a past order was delivered.
+     */
+    addressId: uuid('address_id').references(() => addresses.id, { onDelete: 'set null' }),
     shippingAddress: varchar('shipping_address', { length: 500 }),
     // Payment. Cash-on-delivery is the launch default; online providers
     // (bKash/SSLCommerz/Stripe) plug in by setting paymentMethod + paymentStatus.
@@ -264,6 +301,13 @@ export const orderItems = pgTable('order_items', {
   productName: varchar('product_name', { length: 200 }).notNull(),
   quantity: integer('quantity').notNull(),
   price: decimal('price', { precision: 10, scale: 2 }).notNull(),
+  /**
+   * Subscription coverage for this line. A line can be split: 3 of 5 units
+   * covered when the budget runs out mid-line, so the quantity is recorded
+   * alongside the money.
+   */
+  coveredQuantity: integer('covered_quantity').default(0).notNull(),
+  coveredAmount: decimal('covered_amount', { precision: 10, scale: 2 }).default('0').notNull(),
 });
 
 export const productSubscriptions = pgTable(

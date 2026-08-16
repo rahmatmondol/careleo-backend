@@ -1,6 +1,8 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getModelForPurpose, recordTokenUsage } from './model-registry';
+import { generateText } from './generate';
 import { PetProfileModel } from '@/modules/pet-profile/model';
+import { db } from '@/shared/db';
+import { symptomReports } from '@/shared/db/schema';
 
 export type SymptomAssessment = {
   urgency: 'low' | 'medium' | 'high' | 'emergency';
@@ -11,6 +13,43 @@ export type SymptomAssessment = {
 };
 
 const DISCLAIMER = 'This is AI guidance, not a veterinary diagnosis. For anything serious or worsening, consult a licensed vet.';
+
+/**
+ * How long to wait before asking how the pet is doing.
+ *
+ * The triage itself was always the easy half. The half that changes outcomes is
+ * coming back two days later and asking whether the limp got better — which is
+ * only possible because the assessment is now written down.
+ */
+const FOLLOW_UP_HOURS: Record<SymptomAssessment['urgency'], number> = {
+  emergency: 6,
+  high: 12,
+  medium: 48,
+  low: 96,
+};
+
+/** Best-effort persistence; triage must still work if the write fails. */
+const recordAssessment = async (
+  userId: string,
+  petId: string | undefined,
+  symptomText: string,
+  assessment: SymptomAssessment,
+) => {
+  try {
+    await db.insert(symptomReports).values({
+      userId,
+      petId: petId ?? null,
+      symptoms: symptomText,
+      urgency: assessment.urgency,
+      concern: assessment.concern,
+      advice: assessment.advice,
+      shouldSeeVet: assessment.shouldSeeVet,
+      followUpAt: new Date(Date.now() + FOLLOW_UP_HOURS[assessment.urgency] * 60 * 60 * 1000),
+    });
+  } catch (e: any) {
+    console.warn('[assessSymptoms] could not record report:', e?.message ?? e);
+  }
+};
 
 const parseJson = (text: string): any => {
   const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -44,7 +83,12 @@ export async function assessSymptoms(
 
   try {
     const resolved = await getModelForPurpose('general_chat');
-    if (resolved.provider !== 'google' || !resolved.apiKey) return fallback;
+    // Was `provider !== 'google'` — on any other provider every pet owner got
+    // the "unable to assess" fallback with no indication triage was off.
+    if (!resolved.apiKey) {
+      await recordAssessment(userId, petId, symptomText, fallback);
+      return fallback;
+    }
 
     let context = '';
     if (petId) {
@@ -72,27 +116,31 @@ Return:
 }
 Be cautious: if symptoms could indicate something serious, lean toward higher urgency and shouldSeeVet=true. JSON only.`;
 
-    const genAI = new GoogleGenerativeAI(resolved.apiKey);
-    const model = genAI.getGenerativeModel({ model: resolved.modelName });
-    const result = await model.generateContent(prompt);
-    const usage = result.response.usageMetadata;
+    const { text, inputTokens, outputTokens } = await generateText(resolved, prompt, 1024);
     await recordTokenUsage({
       userId, petId, model: resolved, feature: 'symptom_assessment',
-      inputTokens: usage?.promptTokenCount ?? 200, outputTokens: usage?.candidatesTokenCount ?? 120,
+      inputTokens, outputTokens,
     });
 
-    const parsed = parseJson(result.response.text());
-    if (!parsed || typeof parsed !== 'object') return fallback;
+    const parsed = parseJson(text);
+    if (!parsed || typeof parsed !== 'object') {
+      await recordAssessment(userId, petId, symptomText, fallback);
+      return fallback;
+    }
     const urgency = ['low', 'medium', 'high', 'emergency'].includes(parsed.urgency) ? parsed.urgency : 'medium';
-    return {
+    const assessment: SymptomAssessment = {
       urgency,
       concern: String(parsed.concern ?? fallback.concern),
       shouldSeeVet: parsed.shouldSeeVet ?? urgency !== 'low',
       advice: String(parsed.advice ?? fallback.advice),
       disclaimer: DISCLAIMER,
     };
+
+    await recordAssessment(userId, petId, symptomText, assessment);
+    return assessment;
   } catch (e: any) {
     console.warn('[assessSymptoms] failed, using fallback:', e?.message ?? e);
+    await recordAssessment(userId, petId, symptomText, fallback);
     return fallback;
   }
 }

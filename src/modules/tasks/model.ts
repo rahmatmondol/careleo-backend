@@ -1,6 +1,15 @@
-import { and, asc, desc, eq, gte, lt, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { pets, tasks } from '@/shared/db/schema';
+import { petCaregivers, pets, tasks, users } from '@/shared/db/schema';
+
+/**
+ * A task is "open" when it is neither done nor deliberately skipped.
+ *
+ * Every reminder, escalation and overdue sweep keys off this — a skipped dose
+ * must stop nagging exactly like a completed one, while still being a different
+ * thing in the record.
+ */
+export const isOpenTask = () => and(eq(tasks.isCompleted, false), isNull(tasks.skippedAt));
 
 export const TasksModel = {
   /** Ensure pet belongs to user before task operations. */
@@ -11,6 +20,21 @@ export const TasksModel = {
       .where(and(eq(pets.id, petId), eq(pets.userId, userId)))
       .limit(1);
     return Boolean(rows[0]);
+  },
+
+  /**
+   * Pets this person may act on: their own, plus any they were accepted as a
+   * caregiver for. Used to let a co-owner tick off the dose they just gave.
+   */
+  async accessiblePetIds(userId: string): Promise<string[]> {
+    const [owned, helping] = await Promise.all([
+      db.select({ id: pets.id }).from(pets).where(eq(pets.userId, userId)),
+      db
+        .select({ id: petCaregivers.petId })
+        .from(petCaregivers)
+        .where(and(eq(petCaregivers.userId, userId), eq(petCaregivers.status, 'accepted'))),
+    ]);
+    return [...new Set([...owned.map((r) => r.id), ...helping.map((r) => r.id)])];
   },
 
   /** Create a task under user+pet. */
@@ -27,10 +51,26 @@ export const TasksModel = {
     return rows[0] ?? null;
   },
 
-  /** List tasks for authenticated user with pet name. Optionally filter by pet. */
+  /**
+   * Tasks the user can see: their own, plus those of pets they help with.
+   *
+   * Ordered the way a to-do list is read — soonest first, and anything already
+   * settled (done or skipped) after everything still outstanding. It used to be
+   * `desc(dueDate)`, which put tonight's task above this morning's.
+   */
   async listTasks(userId: string, petId?: string) {
-    const conditions = [eq(tasks.userId, userId)];
-    if (petId) conditions.push(eq(tasks.petId, petId));
+    const accessible = await this.accessiblePetIds(userId);
+
+    const scope = petId
+      ? accessible.includes(petId)
+        ? eq(tasks.petId, petId)
+        : // Not theirs to see — fall back to their own rows for that pet, which
+          // returns nothing rather than leaking somebody else's schedule.
+          and(eq(tasks.userId, userId), eq(tasks.petId, petId))
+      : accessible.length
+        ? or(eq(tasks.userId, userId), inArray(tasks.petId, accessible))
+        : eq(tasks.userId, userId);
+
     return db
       .select({
         id: tasks.id,
@@ -43,17 +83,43 @@ export const TasksModel = {
         dueDate: tasks.dueDate,
         notes: tasks.notes,
         isCompleted: tasks.isCompleted,
+        completedAt: tasks.completedAt,
+        completedBy: tasks.completedBy,
+        completedByName: users.firstName,
+        skippedAt: tasks.skippedAt,
+        skipReason: tasks.skipReason,
         createdAt: tasks.createdAt,
         updatedAt: tasks.updatedAt,
       })
       .from(tasks)
       .innerJoin(pets, eq(tasks.petId, pets.id))
-      .where(and(...conditions))
-      .orderBy(desc(tasks.dueDate), desc(tasks.createdAt));
+      .leftJoin(users, eq(tasks.completedBy, users.id))
+      .where(scope)
+      .orderBy(
+        // Outstanding work first, then the settled rows.
+        sql`(${tasks.isCompleted} OR ${tasks.skippedAt} IS NOT NULL)`,
+        asc(tasks.dueDate),
+        asc(tasks.createdAt),
+      );
   },
 
-  /** Get one task by id/user. */
+  /** Get one task by id, for anyone allowed to act on it. */
   async getTask(userId: string, id: string) {
+    const accessible = await this.accessiblePetIds(userId);
+    const scope = accessible.length
+      ? or(eq(tasks.userId, userId), inArray(tasks.petId, accessible))
+      : eq(tasks.userId, userId);
+
+    const rows = await db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.id, id), scope))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
+  /** Get one task the user *owns* — for edits only the owner may make. */
+  async getOwnedTask(userId: string, id: string) {
     const rows = await db
       .select()
       .from(tasks)
@@ -62,14 +128,28 @@ export const TasksModel = {
     return rows[0] ?? null;
   },
 
-  /** Update one task by id/user. */
+  /** Update one task by id. Scope is decided by the caller. */
   async updateTask(
-    userId: string,
     id: string,
-    payload: Partial<{ title: string; taskType: string; frequency: string; dueDate: Date; notes: string; isCompleted: boolean }>,
+    payload: Partial<{
+      title: string;
+      taskType: string;
+      frequency: string;
+      dueDate: Date;
+      notes: string;
+      isCompleted: boolean;
+      completedAt: Date | null;
+      completedBy: string | null;
+      skippedAt: Date | null;
+      skipReason: string | null;
+    }>,
   ) {
-    await db.update(tasks).set({ ...payload, updatedAt: new Date() }).where(and(eq(tasks.id, id), eq(tasks.userId, userId)));
-    return this.getTask(userId, id);
+    const rows = await db
+      .update(tasks)
+      .set({ ...payload, updatedAt: new Date() })
+      .where(eq(tasks.id, id))
+      .returning();
+    return rows[0] ?? null;
   },
 
   /**
@@ -90,11 +170,35 @@ export const TasksModel = {
           eq(tasks.userId, userId),
           eq(tasks.petId, petId),
           eq(tasks.title, title),
-          eq(tasks.isCompleted, false),
+          isOpenTask(),
           gte(tasks.dueDate, dayStart),
           lt(tasks.dueDate, dayEnd),
         ),
       )
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
+  /**
+   * The untouched future occurrence a completion spawned.
+   *
+   * Un-completing has to take it back, or undoing a mis-tap leaves tomorrow's
+   * task sitting there as a duplicate of one that never happened.
+   */
+  async findSpawnedOccurrence(userId: string, petId: string, title: string, after: Date) {
+    const rows = await db
+      .select({ id: tasks.id, dueDate: tasks.dueDate })
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.userId, userId),
+          eq(tasks.petId, petId),
+          eq(tasks.title, title),
+          isOpenTask(),
+          gte(tasks.dueDate, after),
+        ),
+      )
+      .orderBy(asc(tasks.dueDate))
       .limit(1);
     return rows[0] ?? null;
   },
@@ -119,7 +223,7 @@ export const TasksModel = {
       .from(tasks)
       .where(
         and(
-          eq(tasks.isCompleted, false),
+          isOpenTask(),
           lt(tasks.dueDate, before),
           ne(tasks.frequency, 'none'),
           sql`${tasks.frequency} <> ''`,
@@ -144,7 +248,41 @@ export const TasksModel = {
     const rows = await db
       .delete(tasks)
       .where(and(eq(tasks.id, id), eq(tasks.userId, userId)))
-      .returning({ id: tasks.id });
+      // `dueDate` comes back so the caller can recompute the notification slot
+      // the task just vacated — the row is gone by then.
+      .returning({ id: tasks.id, dueDate: tasks.dueDate });
     return rows[0] ?? null;
+  },
+
+  /** Remove a spawned occurrence when its parent completion is undone. */
+  async deleteById(id: string) {
+    const rows = await db.delete(tasks).where(eq(tasks.id, id)).returning({ id: tasks.id, dueDate: tasks.dueDate });
+    return rows[0] ?? null;
+  },
+
+  /** Open tasks in a window — backs "mark the whole morning done". */
+  async listOpenTasksBetween(userId: string, from: Date, to: Date, petId?: string) {
+    const accessible = await this.accessiblePetIds(userId);
+    const scope = accessible.length
+      ? or(eq(tasks.userId, userId), inArray(tasks.petId, accessible))
+      : eq(tasks.userId, userId);
+
+    const conditions = [scope, isOpenTask(), gte(tasks.dueDate, from), lt(tasks.dueDate, to)];
+    if (petId) conditions.push(eq(tasks.petId, petId));
+
+    return db
+      .select({
+        id: tasks.id,
+        userId: tasks.userId,
+        petId: tasks.petId,
+        title: tasks.title,
+        taskType: tasks.taskType,
+        frequency: tasks.frequency,
+        dueDate: tasks.dueDate,
+        notes: tasks.notes,
+      })
+      .from(tasks)
+      .where(and(...conditions))
+      .orderBy(asc(tasks.dueDate));
   },
 };

@@ -1,6 +1,12 @@
 import { and, eq } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { subscriptionPlans, userSubscriptions } from '@/shared/db/schema';
+import {
+  categories,
+  planCoverageRules,
+  products,
+  subscriptionPlans,
+  userSubscriptions,
+} from '@/shared/db/schema';
 import type { FeatureFlags, PlanLimits } from './catalog';
 
 export type PlanRow = typeof subscriptionPlans.$inferSelect;
@@ -110,5 +116,59 @@ export const SubscriptionsModel = {
       .values({ userId, planId, status: 'active' })
       .returning();
     return row;
+  },
+
+  // ── Coverage rules (what the plan's food budget may be spent on) ───────────
+
+  /**
+   * Rules for a plan, with the category/product name resolved so the Plan
+   * Builder can list them without a second round of lookups. A rule whose
+   * target has since been deleted still comes back, labelled — otherwise it
+   * would be invisible in the UI and impossible to clean up.
+   */
+  listCoverageRules: async (planId: string) => {
+    const rows = await db
+      .select({
+        id: planCoverageRules.id,
+        planId: planCoverageRules.planId,
+        scope: planCoverageRules.scope,
+        refId: planCoverageRules.refId,
+        monthlyQtyLimit: planCoverageRules.monthlyQtyLimit,
+        categoryName: categories.name,
+        productName: products.name,
+      })
+      .from(planCoverageRules)
+      .leftJoin(categories, eq(planCoverageRules.refId, categories.id))
+      .leftJoin(products, eq(planCoverageRules.refId, products.id))
+      .where(eq(planCoverageRules.planId, planId));
+
+    return rows.map((r) => ({
+      id: r.id,
+      planId: r.planId,
+      scope: r.scope,
+      refId: r.refId,
+      monthlyQtyLimit: r.monthlyQtyLimit === null ? null : Number(r.monthlyQtyLimit),
+      label: (r.scope === 'product' ? r.productName : r.categoryName) ?? '(deleted)',
+    }));
+  },
+
+  /** Replace a plan's whole rule set — the Plan Builder edits it as one list. */
+  replaceCoverageRules: async (
+    planId: string,
+    rules: { scope: string; refId: string; monthlyQtyLimit: number | null }[],
+  ) => {
+    await db.transaction(async (tx) => {
+      await tx.delete(planCoverageRules).where(eq(planCoverageRules.planId, planId));
+      if (!rules.length) return;
+      await tx.insert(planCoverageRules).values(
+        rules.map((r) => ({
+          planId,
+          scope: r.scope,
+          refId: r.refId,
+          monthlyQtyLimit: r.monthlyQtyLimit === null ? null : String(r.monthlyQtyLimit),
+        })),
+      );
+    });
+    return SubscriptionsModel.listCoverageRules(planId);
   },
 };

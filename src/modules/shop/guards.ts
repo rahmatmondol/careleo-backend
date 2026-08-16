@@ -1,5 +1,7 @@
 import { ForbiddenError, UnauthorizedError } from '@/shared/errors';
 import type { DomainUser } from '@/shared/auth/domain-auth';
+import { can } from '@/modules/subscriptions/entitlements';
+import type { FeatureKey } from '@/modules/subscriptions/catalog';
 import { hasPermission } from './utils/common';
 
 type GuardContext = { request: Request; user?: DomainUser | null };
@@ -34,5 +36,22 @@ export const requirePermission =
     if (!user) throw new UnauthorizedError('Authentication required');
     if (!hasPermission(user.role, permission)) {
       throw new ForbiddenError(`Missing permission: ${permission}`);
+    }
+  };
+
+/**
+ * `beforeHandle` guard factory for subscription-gated customer routes.
+ *
+ * The shop had no entitlement check at all: `store_access` is toggled per plan
+ * in the Plan Builder and mapped in roadmap §3 as a paid capability, but every
+ * signed-in user could fill a cart and check out regardless of their tier.
+ * Browsing the catalogue stays open — only the buying routes are gated.
+ */
+export const requireFeature =
+  (feature: FeatureKey) =>
+  async ({ user }: GuardContext) => {
+    if (!user) throw new UnauthorizedError('Authentication required');
+    if (!(await can(user.id, feature))) {
+      throw new ForbiddenError('Your plan does not include store purchases. Upgrade to continue.');
     }
   };

@@ -94,26 +94,84 @@ export const verifyFirebaseIdToken = async (idToken: string) => {
 };
 
 /**
+ * Android notification channels. These ids must match the channels the mobile
+ * app creates in `src/services/notificationChannels.ts` — an unknown id falls
+ * back to the app's default channel, which silently loses the importance and
+ * the sound we asked for.
+ */
+export const PUSH_CHANNELS = {
+  critical: 'careleo-critical',
+  tasks: 'careleo-tasks',
+  default: 'careleo-default',
+  quiet: 'careleo-quiet',
+} as const;
+
+export type PushChannel = (typeof PUSH_CHANNELS)[keyof typeof PUSH_CHANNELS];
+
+/**
  * Send push notification via FCM to a list of device tokens.
+ *
+ * `channelId` decides how loudly it lands on Android; `critical` also raises
+ * the APNs interruption level so a missed dose can break through Focus.
+ *
+ * `dataOnly` omits the `notification` block so the payload is delivered to the
+ * app's background handler instead of being drawn by the OS. That is what makes
+ * the Done / Snooze buttons possible on Android — the app draws the
+ * notification itself, with actions attached. iOS gets the ordinary
+ * notification block plus an APNs `category`, which is how actions are attached
+ * there. Callers are expected to send one call per platform.
  */
 export const sendPushToTokens = async (
   tokens: string[],
-  payload: { title: string; body: string; data?: Record<string, string> },
+  payload: {
+    title: string;
+    body: string;
+    data?: Record<string, string>;
+    channelId?: PushChannel;
+    critical?: boolean;
+    dataOnly?: boolean;
+    categoryId?: string;
+  },
 ) => {
   if (tokens.length === 0) return { successCount: 0, failureCount: 0, responses: [] as unknown[] };
 
   const app = getFirebaseApp();
-  const auth = getAuth(app);
 
   const messaging = (await import('firebase-admin/messaging')).getMessaging(app);
 
+  const channelId = payload.channelId ?? PUSH_CHANNELS.default;
+  const quiet = channelId === PUSH_CHANNELS.quiet;
+
+  // A data-only message carries its own copy of the text, since there is no
+  // notification block for the client to read it from.
+  const data: Record<string, string> = {
+    ...(payload.data ?? {}),
+    channelId,
+    ...(payload.dataOnly ? { title: payload.title, body: payload.body } : {}),
+    ...(payload.categoryId ? { categoryId: payload.categoryId } : {}),
+  };
+
   const result = await messaging.sendEachForMulticast({
     tokens,
-    notification: {
-      title: payload.title,
-      body: payload.body,
+    ...(payload.dataOnly
+      ? {}
+      : { notification: { title: payload.title, body: payload.body } }),
+    data,
+    android: {
+      priority: quiet ? 'normal' : 'high',
+      ...(payload.dataOnly
+        ? {}
+        : { notification: { channelId, sound: quiet ? undefined : 'default' } }),
     },
-    data: payload.data,
+    apns: {
+      payload: {
+        aps: {
+          sound: quiet ? undefined : 'default',
+          interruptionLevel: payload.critical ? 'time-sensitive' : quiet ? 'passive' : 'active',
+          ...(payload.categoryId ? { category: payload.categoryId } : {}),
+        },
+      },
+    },
   });
 
   return result;

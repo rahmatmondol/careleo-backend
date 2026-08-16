@@ -11,11 +11,12 @@
 
 import { and, eq, gte, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { pets } from '@/shared/db/schema';
+import { pets, users } from '@/shared/db/schema';
 import { aiChatSessions, aiChatMessages, aiProactiveMessages } from '@/shared/db/schema/ai.schema';
 import { can } from '@/modules/subscriptions/entitlements';
 import { AiService } from '@/modules/ai/service';
-import { NotificationsService } from '@/modules/notifications/service';
+import { deliverToUser } from '@/modules/notifications/deliver';
+import { hourInZone } from '@/shared/types/timezone';
 
 const DEFAULT_HOUR = 9;
 const MAX_PER_RUN = 100;
@@ -31,7 +32,8 @@ export type DailyCheckinOptions = {
 
 export async function runDailyCheckinJob(opts: DailyCheckinOptions = {}) {
   const now = new Date();
-  const currentHour = opts.forceHour ?? now.getHours();
+  // The "current hour" is resolved per user, in their own timezone — see
+  // `hourIn` below. There is no single server-wide hour that means anything.
   const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
   // Distinct users that own at least one pet.
@@ -70,10 +72,11 @@ export async function runDailyCheckinJob(opts: DailyCheckinOptions = {}) {
       .limit(1);
     if (recent) continue;
 
-    // Smart timing: only fire on the user's preferred hour.
+    // Smart timing: only fire on the user's preferred hour, in their zone.
     if (!opts.ignoreHour) {
-      const preferredHour = await getPreferredHour(userId);
-      if (preferredHour !== currentHour) {
+      const timeZone = await getUserTimezone(userId);
+      const preferredHour = await getPreferredHour(userId, timeZone);
+      if (preferredHour !== (opts.forceHour ?? hourInZone(timeZone, now))) {
         consideredButOffHour++;
         continue;
       }
@@ -111,11 +114,13 @@ export async function runDailyCheckinJob(opts: DailyCheckinOptions = {}) {
 
     // Best-effort push; never let a push failure abort the run.
     try {
-      await NotificationsService.sendToUsers(
-        [userId],
-        { title: 'Careleo', body: message, type: 'AI_ASSISTANT' },
-        { targetMode: 'single' },
-      );
+      await deliverToUser(userId, {
+        title: 'Careleo',
+        body: message,
+        type: 'AI_CHECKIN',
+        priority: 'low',
+        data: { event: 'daily_checkin', petId: pet.id },
+      });
     } catch (e: any) {
       console.warn('[daily-checkin] push failed for user', userId, e?.message ?? e);
     }
@@ -127,16 +132,37 @@ export async function runDailyCheckinJob(opts: DailyCheckinOptions = {}) {
 }
 
 /** Most common hour-of-day the user sends chat messages; DEFAULT_HOUR if none. */
-async function getPreferredHour(userId: string): Promise<number> {
+/**
+ * The user's own clock.
+ *
+ * Falls back to a configured zone rather than the server's, which is an
+ * accident of deployment and matches nobody.
+ */
+const FALLBACK_TZ = process.env.APP_DEFAULT_TIMEZONE || 'Asia/Dhaka';
+
+async function getUserTimezone(userId: string): Promise<string> {
+  const [row] = await db.select({ tz: users.timezone }).from(users).where(eq(users.id, userId)).limit(1);
+  return row?.tz || FALLBACK_TZ;
+}
+
+/**
+ * The hour the user most often chats, in their own timezone.
+ *
+ * `created_at` is `timestamptz`, so a bare `EXTRACT(HOUR FROM …)` reads it in
+ * the *database session's* zone — usually UTC. That was then compared against
+ * `new Date().getHours()`, the *Node process's* zone. Two different clocks,
+ * neither of them the user's, so check-ins landed at an arbitrary local time.
+ */
+async function getPreferredHour(userId: string, timeZone: string): Promise<number> {
   const rows = await db
     .select({
-      hour: sql<number>`EXTRACT(HOUR FROM ${aiChatMessages.createdAt})::int`,
+      hour: sql<number>`EXTRACT(HOUR FROM ${aiChatMessages.createdAt} AT TIME ZONE ${timeZone})::int`,
       count: sql<number>`count(*)::int`,
     })
     .from(aiChatMessages)
     .innerJoin(aiChatSessions, eq(aiChatMessages.sessionId, aiChatSessions.id))
     .where(and(eq(aiChatSessions.userId, userId), eq(aiChatMessages.role, 'user')))
-    .groupBy(sql`EXTRACT(HOUR FROM ${aiChatMessages.createdAt})`)
+    .groupBy(sql`EXTRACT(HOUR FROM ${aiChatMessages.createdAt} AT TIME ZONE ${timeZone})`)
     .orderBy(sql`count(*) DESC`)
     .limit(1);
   return rows[0]?.hour ?? DEFAULT_HOUR;

@@ -42,7 +42,9 @@ export async function analyzePetImage(
   resolvedModel?: ResolvedModel,
 ): Promise<PetVisionResult> {
   const provider = resolvedModel?.provider ?? 'google';
-  const modelName = resolvedModel?.modelName ?? 'gemini-1.5-flash';
+  // A moving alias for the same reason as the registry fallback — pinned
+  // versions here have been retired out from under us twice.
+  const modelName = resolvedModel?.modelName ?? 'gemini-flash-latest';
   const apiKey = resolvedModel?.apiKey ?? process.env.GOOGLE_GEMINI_API_KEY ?? '';
 
   if (!apiKey) throw new Error('No API key configured for vision model');

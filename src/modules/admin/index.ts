@@ -2,7 +2,7 @@ import { Elysia } from 'elysia';
 import { AdminService } from './service';
 import { AdminAiService } from './ai-service';
 import { requireAuth, requirePermission } from '@/shared/auth/guards';
-import { NotFoundError } from '@/shared/errors';
+import { NotFoundError, ValidationError } from '@/shared/errors';
 import { getProviderCatalog } from '@/modules/ai/provider-catalog';
 
 export const adminController = new Elysia({ name: 'admin-controller' }).group('/admin', (app) =>
@@ -50,6 +50,62 @@ export const adminController = new Elysia({ name: 'admin-controller' }).group('/
       const user = await requireAuth(ctx.headers, ctx.jwt);
       requirePermission(user, 'plans.manage');
       const data = await AdminService.getSubscriptionAnalytics();
+      return { success: true, data, error: null };
+    })
+
+    .get('/subscriptions/:id', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'plans.manage');
+      const data = await AdminService.getSubscription(String(ctx.params.id));
+      if (!data) throw new NotFoundError('Subscription not found');
+      return { success: true, data, error: null };
+    })
+
+    .patch('/subscriptions/:id', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'plans.manage');
+      const data = await AdminService.updateSubscription(String(ctx.params.id), (ctx.body ?? {}) as Record<string, unknown>);
+      if (!data) throw new NotFoundError('Subscription not found');
+      return { success: true, data, error: null };
+    })
+
+    // ─── Admin staff & roles ───────────────────────────────────────────
+    .get('/staff', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'roles.manage');
+      const data = await AdminService.listAdmins();
+      return { success: true, data, error: null };
+    })
+
+    .post('/staff', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'roles.manage');
+      const result = await AdminService.createAdmin((ctx.body ?? {}) as Record<string, unknown>);
+      if ('error' in result) throw new ValidationError(result.error);
+      return { success: true, data: result, error: null };
+    })
+
+    .patch('/staff/:id', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'roles.manage');
+      const data = await AdminService.updateAdmin(String(ctx.params.id), (ctx.body ?? {}) as Record<string, unknown>);
+      if (!data) throw new NotFoundError('Admin not found');
+      return { success: true, data, error: null };
+    })
+
+    /** Revokes admin access; the underlying user row is kept. */
+    .delete('/staff/:id', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'roles.manage');
+      const data = await AdminService.revokeAdmin(String(ctx.params.id));
+      if (!data) throw new NotFoundError('Admin not found');
+      return { success: true, data, error: null };
+    })
+
+    .get('/roles', async (ctx: any) => {
+      const user = await requireAuth(ctx.headers, ctx.jwt);
+      requirePermission(user, 'roles.manage');
+      const data = await AdminService.listRoles();
       return { success: true, data, error: null };
     })
 

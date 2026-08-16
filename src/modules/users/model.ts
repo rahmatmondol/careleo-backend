@@ -39,6 +39,8 @@ export const UsersModel = {
       state?: string;
       country?: string;
       postalCode?: string;
+      /** Validated upstream by `isIanaZone`. */
+      timezone?: string;
     },
   ) {
     await db

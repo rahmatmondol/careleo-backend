@@ -12,7 +12,7 @@ import { pets } from '@/shared/db/schema';
 import { aiChatSessions, aiChatMessages, aiProactiveMessages } from '@/shared/db/schema/ai.schema';
 import { can } from '@/modules/subscriptions/entitlements';
 import { VaccinationsModel } from '@/modules/vaccinations/model';
-import { NotificationsService } from '@/modules/notifications/service';
+import { deliverToUser } from '@/modules/notifications/deliver';
 
 const MAX_PER_RUN = 100;
 
@@ -53,11 +53,12 @@ export async function runVaccineDueJob(opts: VaccineDueOptions = {}) {
     await VaccinationsModel.update(vac.id, { lastRemindedAt: now });
 
     try {
-      await NotificationsService.sendToUsers(
-        [vac.userId],
-        { title: 'Careleo', body: message, type: 'AI_ASSISTANT' },
-        { targetMode: 'single' },
-      );
+      await deliverToUser(vac.userId, {
+        title: 'Careleo',
+        body: message,
+        type: 'VACCINE_DUE',
+        data: { event: 'vaccine_due', petId: vac.petId, vaccinationId: vac.id },
+      });
     } catch (e: any) {
       console.warn('[vaccine-due] push failed for user', vac.userId, e?.message ?? e);
     }

@@ -71,6 +71,62 @@
       "when": 1785873647408,
       "tag": "0009_sour_patriot",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786689738469,
+      "tag": "0010_confused_captain_universe",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786694965194,
+      "tag": "0011_marvelous_sister_grimm",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1786705161831,
+      "tag": "0012_freezing_lucky_pierre",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1786713263707,
+      "tag": "0013_common_captain_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1786713871232,
+      "tag": "0014_absent_talisman",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1786868494769,
+      "tag": "0015_true_shard",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1786870141960,
+      "tag": "0016_clean_warbound",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786876004498,
+      "tag": "0017_bitter_ikaris",
+      "breakpoints": true
     }
   ]
 }

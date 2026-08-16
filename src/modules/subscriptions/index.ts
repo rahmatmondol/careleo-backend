@@ -41,6 +41,17 @@ export const adminSubscriptionsController = new Elysia({ name: 'admin-subscripti
         const user = await requireAuth(ctx.headers, ctx.jwt);
         requirePermission(user, 'plans.manage');
         return SubscriptionsService.deletePlan(String(ctx.params.id));
+      })
+      /** Which categories/products this plan's food budget may be spent on. */
+      .get('/:id/coverage', async (ctx: any) => {
+        const user = await requireAuth(ctx.headers, ctx.jwt);
+        requirePermission(user, 'plans.manage');
+        return SubscriptionsService.planCoverage(String(ctx.params.id));
+      })
+      .put('/:id/coverage', async (ctx: any) => {
+        const user = await requireAuth(ctx.headers, ctx.jwt);
+        requirePermission(user, 'plans.manage');
+        return SubscriptionsService.setPlanCoverage(String(ctx.params.id), (ctx.body ?? {}) as Record<string, unknown>);
       }),
 );
 

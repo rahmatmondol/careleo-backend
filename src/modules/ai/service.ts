@@ -21,6 +21,9 @@ import {
   type AiPurpose,
   type ResolvedModel,
 } from './model-registry';
+import { generateText, parseJsonResponse } from './generate';
+import { CURRENCY_CODE, CURRENCY_SYMBOL } from '@/shared/types/currency';
+import { streamChatTurn, type ChatImage, type ChatStreamEvent } from './stream';
 
 // ─── Provider-specific chat clients ──────────────────────────────────────────
 
@@ -60,61 +63,113 @@ function buildAnthropicClient(resolved: ResolvedModel): Anthropic {
   });
 }
 
-function parseJson(text: string) {
-  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
-  return JSON.parse(cleaned);
-}
+const parseJson = parseJsonResponse;
+
+/** Bengali script range — enough to tell which language to fail in. */
+const BENGALI = /[ঀ-৿]/;
 
 /**
- * One-shot text generation that honours the resolved provider instead of
- * assuming Gemini. Returns the text plus usage so callers can record tokens.
+ * Fallback copy in the language the user is actually writing in.
+ *
+ * These strings used to be hardcoded Bengali, which is wrong for the English
+ * half of the audience — a failure arrived in a script they may not read.
  */
-async function generateText(
-  resolved: ResolvedModel,
-  prompt: string,
-  maxTokens = 2048,
-): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
-  if (resolved.provider === 'openai' || resolved.provider === 'deepseek' || resolved.provider === 'openai_custom') {
-    const client = buildOpenAIClient(resolved);
-    const res = await client.chat.completions.create({
-      model: resolved.modelName,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: maxTokens,
-    });
-    return {
-      text: res.choices[0]?.message?.content ?? '',
-      inputTokens: res.usage?.prompt_tokens ?? 0,
-      outputTokens: res.usage?.completion_tokens ?? 0,
-    };
-  }
-
-  if (resolved.provider === 'anthropic' || resolved.provider === 'anthropic_custom') {
-    const client = buildAnthropicClient(resolved);
-    const res = await client.messages.create({
-      model: resolved.modelName,
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }],
-    });
-    const text = res.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n');
-    return {
-      text,
-      inputTokens: res.usage?.input_tokens ?? 0,
-      outputTokens: res.usage?.output_tokens ?? 0,
-    };
-  }
-
-  const genAI = new GoogleGenerativeAI(resolved.apiKey);
-  const model = genAI.getGenerativeModel({ model: resolved.modelName });
-  const result = await model.generateContent(prompt);
-  const usage = result.response.usageMetadata;
+const fallbackCopy = (userText: string) => {
+  const bn = BENGALI.test(userText);
   return {
-    text: result.response.text() ?? '',
-    inputTokens: usage?.promptTokenCount ?? 0,
-    outputTokens: usage?.candidatesTokenCount ?? 0,
+    failed: bn
+      ? 'আমি তোমাকে সাহায্য করতে পারলাম না। আবার চেষ্টা করো।'
+      : "I couldn't complete that. Please try again.",
+    didActions: bn
+      ? 'কাজগুলো করে ফেলেছি, তবে গুছিয়ে বলতে পারলাম না। নিচে যা করেছি:'
+      : "I finished the actions but couldn't summarise them. Here is what I did:",
   };
+};
+
+/**
+ * Compact, provider-neutral record of the actions an earlier turn took.
+ *
+ * Tool calls are persisted to `toolCallsJson` but only message text was ever
+ * rebuilt into the next turn's history, so on a follow-up ("did you set that
+ * reminder?") the model had no idea it had just acted. Replaying the raw
+ * provider-specific tool blocks would mean three different formats; appending a
+ * short note to the assistant's own message works for all of them.
+ */
+const withToolNote = (content: string, toolCallsJson?: string | null): string => {
+  if (!toolCallsJson) return content;
+  try {
+    const calls = JSON.parse(toolCallsJson) as { tool: string; args?: Record<string, unknown> }[];
+    if (!Array.isArray(calls) || calls.length === 0) return content;
+    const summary = calls
+      .map((c) => `${c.tool}(${Object.keys(c.args ?? {}).join(', ')})`)
+      .join('; ');
+    return `${content}\n\n[actions you already performed in this turn: ${summary}]`;
+  } catch {
+    return content;
+  }
+};
+
+/**
+ * Whether the chat model can accept an image alongside the text.
+ *
+ * Deliberately a name check rather than a provider check: `openai_custom` may
+ * be a local Llava that sees, while plain `deepseek` does not. Erring towards
+ * "no" is safe — the fallback path describes the image with the vision model
+ * and the user still gets an answer.
+ */
+const VISION_CAPABLE = /gemini|gpt-4o|gpt-4\.1|gpt-5|o[34]|claude|llava|vision/i;
+
+const modelSupportsVision = (resolved: ResolvedModel): boolean =>
+  resolved.provider === 'google' || VISION_CAPABLE.test(resolved.modelName);
+
+/** Turns kept verbatim; anything older is folded into the session summary. */
+const CONTEXT_WINDOW = 20;
+/** Summarise once this many messages sit outside the window. */
+const SUMMARY_TRIGGER = 10;
+
+/**
+ * Fold older turns into a rolling summary so a long conversation keeps its
+ * thread.
+ *
+ * Only the last `CONTEXT_WINDOW` messages were ever sent to the model, so a
+ * conversation that ran past that quietly forgot how it started — the user
+ * would be asked again for something they had already explained. This
+ * compresses everything that has scrolled out and carries it forward.
+ *
+ * Best-effort: a failure here degrades memory, so it must never fail a reply.
+ */
+async function updateSessionSummary(
+  session: { id: string; summary: string | null; summarizedUpTo: number },
+  history: { role: string; content: string | null }[],
+): Promise<string | null> {
+  const outsideWindow = Math.max(0, history.length - CONTEXT_WINDOW);
+  if (outsideWindow - session.summarizedUpTo < SUMMARY_TRIGGER) return session.summary;
+
+  try {
+    const unsummarized = history
+      .slice(session.summarizedUpTo, outsideWindow)
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => `${m.role}: ${(m.content ?? '').slice(0, 600)}`)
+      .join('\n');
+    if (!unsummarized.trim()) return session.summary;
+
+    const resolved = await getModelForPurpose('general_chat');
+    if (!resolved.apiKey) return session.summary;
+
+    const { text } = await generateText(
+      resolved,
+      `${session.summary ? `Summary so far:\n${session.summary}\n\n` : ''}New part of the conversation:\n${unsummarized}\n\nRewrite the summary so it covers everything above. Keep only what still matters later: decisions made, facts about the pet, things the user asked for or refused, and anything still outstanding. Drop pleasantries. Under 200 words, plain prose, no preamble.`,
+      512,
+    );
+
+    const summary = text.trim();
+    if (!summary) return session.summary;
+    await AiModel.updateSessionSummary(session.id, summary, outsideWindow);
+    return summary;
+  } catch (e: any) {
+    console.warn('[updateSessionSummary] failed:', e?.message ?? e);
+    return session.summary;
+  }
 }
 
 // ─── Onboarding question cache ───────────────────────────────────────────────
@@ -251,7 +306,11 @@ Health & vet handling:
 - If the user describes their pet feeling unwell, use detect_symptoms to gauge urgency. It is guidance, not a diagnosis — always say so.
 - If a vet visit is advised, use find_nearby_vets, then get_vet_availability, then book_vet_appointment (confirm details first).
 - After a vet visit, capture what happened with save_medical_record, and set reminders for any medication or follow-up.
-- Record vaccinations with add_vaccination (a due date sets a reminder).`;
+- Record vaccinations with add_vaccination (a due date sets a reminder).
+
+Money:
+- Every amount on this platform is in ${CURRENCY_CODE} and is written ${CURRENCY_SYMBOL}. Tools return ready-made \`*_display\` strings — quote them as they are.
+- Never convert to another currency, and never swap in a different symbol because of the language being spoken or where the user lives.`;
 }
 
 export const AiService = {
@@ -360,8 +419,8 @@ Return ONLY the valid JSON array. No markdown, no extra text.`;
           userId,
           model: resolved,
           feature: 'onboarding',
-          inputTokens: inputTokens || 300,
-          outputTokens: outputTokens || 500,
+          inputTokens,
+          outputTokens,
         });
 
         const aiQuestions = parseJson(text);
@@ -451,8 +510,8 @@ Return ONLY a JSON array of 3 strings.`;
         petId,
         model: resolved,
         feature: 'onboarding_insights',
-        inputTokens: inputTokens || 300,
-        outputTokens: outputTokens || 150,
+        inputTokens,
+        outputTokens,
       });
 
       const parsed = parseJson(text);
@@ -517,31 +576,42 @@ Return ONLY a JSON array of 3 strings.`;
 
     // Fetch last 20 messages for context window
     const history = await AiModel.getMessages(sessionId);
-    const recentHistory = history.slice(-20);
+    const recentHistory = history.slice(-CONTEXT_WINDOW);
+    const summary = await updateSessionSummary(session as any, history);
 
     // Build enriched system prompt (pet data + admin instructions)
-    const systemPrompt = await buildSystemPrompt(userId, activePetId);
+    const basePrompt = await buildSystemPrompt(userId, activePetId);
+    // Earlier turns that no longer fit the window, carried forward so the
+    // thread survives a long conversation.
+    const systemPrompt = summary
+      ? `${basePrompt}\n\n[EARLIER IN THIS CONVERSATION]\n${summary}\n[END EARLIER]`
+      : basePrompt;
 
-    // Convert DB history to Gemini format (exclude the message just saved)
-    const chatHistory = recentHistory
+    // Prior turns, with each assistant message carrying a note of the tools it
+    // ran so a follow-up question can refer back to those actions.
+    const priorTurns = recentHistory
       .filter((m) => m.role === 'user' || m.role === 'assistant')
       .slice(0, -1)
       .map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content ?? '' }],
+        role: m.role as 'user' | 'assistant',
+        content: m.role === 'assistant' ? withToolNote(m.content ?? '', m.toolCallsJson) : m.content ?? '',
       }));
-
-    const geminiModel = buildGeminiChatModel(resolved, true);
-    const chat = geminiModel.startChat({
-      history: chatHistory,
-      systemInstruction: { role: 'user', parts: [{ text: systemPrompt }] },
-    });
 
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     const toolCallsLog: any[] = [];
+    const copy = fallbackCopy(userMessage);
 
     let finalText = '';
+
+    /**
+     * Re-check the budget between tool iterations.
+     *
+     * The limit was only checked once, before the first call — a single message
+     * that fans out into five tool round-trips could run far past a user's daily
+     * cap before anything noticed.
+     */
+    const budgetExhausted = async () => !(await checkUserTokenLimit(userId)).allowed;
 
     // ── Route to correct provider ─────────────────────────────────────
     if (resolved.provider === 'openai' || resolved.provider === 'deepseek' || resolved.provider === 'openai_custom') {
@@ -549,15 +619,13 @@ Return ONLY a JSON array of 3 strings.`;
       const oaiClient = buildOpenAIClient(resolved);
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: 'system', content: systemPrompt },
-        ...recentHistory
-          .filter(m => m.role === 'user' || m.role === 'assistant')
-          .slice(0, -1)
-          .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' })),
+        ...priorTurns,
         { role: 'user', content: userMessage },
       ];
 
       // Tool-calling loop (max 5 iterations)
       for (let iter = 0; iter < 5; iter++) {
+        if (iter > 0 && (await budgetExhausted())) break;
         const res = await oaiClient.chat.completions.create({
           model: resolved.modelName,
           messages,
@@ -593,17 +661,15 @@ Return ONLY a JSON array of 3 strings.`;
     } else if (resolved.provider === 'anthropic' || resolved.provider === 'anthropic_custom') {
       // Anthropic / Anthropic-compatible proxy
       const anthropic = buildAnthropicClient(resolved);
-      const anthropicMsgs: Anthropic.MessageParam[] = recentHistory
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .slice(0, -1)
-        .map(m => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content ?? '',
-        }));
+      const anthropicMsgs: Anthropic.MessageParam[] = priorTurns.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
       anthropicMsgs.push({ role: 'user', content: userMessage });
 
       // Tool-calling loop (max 5 iterations)
       for (let iter = 0; iter < 5; iter++) {
+        if (iter > 0 && (await budgetExhausted())) break;
         const res = await anthropic.messages.create({
           model: resolved.modelName,
           max_tokens: 4096,
@@ -640,9 +706,21 @@ Return ONLY a JSON array of 3 strings.`;
 
     } else {
       // ── Gemini (default) ────────────────────────────────────────────
+      // Built here rather than up front: the Gemini client used to be
+      // constructed on every request regardless of provider, handing an
+      // Anthropic or OpenAI key to Google's SDK for an object nobody used.
+      const chat = buildGeminiChatModel(resolved, true).startChat({
+        history: priorTurns.map((m) => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        })),
+        systemInstruction: { role: 'user', parts: [{ text: systemPrompt }] },
+      });
+
       let currentMessage: any = userMessage;
 
       for (let iteration = 0; iteration < 5; iteration++) {
+        if (iteration > 0 && (await budgetExhausted())) break;
         const result = await chat.sendMessage(currentMessage);
         const response = result.response;
         const usage = response.usageMetadata;
@@ -671,8 +749,53 @@ Return ONLY a JSON array of 3 strings.`;
       }
     }
 
-    if (!finalText) {
-      finalText = 'আমি তোমাকে সাহায্য করতে পারলাম না। আবার চেষ্টা করো।';
+    /**
+     * The loop can end with tools still pending — five iterations is a hard
+     * stop, not a natural end. That left `finalText` empty and the user was
+     * told the assistant had failed, even though the tools had already run and
+     * changed their data (a task really was created). They would then retry and
+     * duplicate it.
+     *
+     * So: ask once more with no tools available, which forces a written answer
+     * from everything gathered. Only if that also fails do we admit defeat, and
+     * then we say what was actually done rather than pretending nothing was.
+     */
+    if (!finalText && toolCallsLog.length > 0) {
+      try {
+        const recap = toolCallsLog
+          .map((t) => `- ${t.tool}(${JSON.stringify(t.args ?? {})}) -> ${String(t.result).slice(0, 500)}`)
+          .join('\n');
+        const wrapUp = await generateText(
+          resolved,
+          `${systemPrompt}\n\nThe user said: "${userMessage}"\n\nYou already performed these actions and got these results:\n${recap}\n\nWrite the reply to the user now. Confirm what you did, in their language. Do not ask to run anything else.`,
+          1024,
+        );
+        finalText = wrapUp.text.trim();
+        totalInputTokens += wrapUp.inputTokens;
+        totalOutputTokens += wrapUp.outputTokens;
+      } catch (e: any) {
+        console.warn('[sendMessage] wrap-up call failed:', e?.message ?? e);
+      }
+
+      if (!finalText) {
+        finalText = `${copy.didActions}\n${toolCallsLog.map((t) => `• ${t.tool}`).join('\n')}`;
+      }
+    }
+
+    if (!finalText) finalText = copy.failed;
+
+    /**
+     * Record what the provider actually reported.
+     *
+     * These used to fall back to `|| 500` and `|| 300`, so a provider that
+     * omits usage (Ollama and several OpenAI-compatible proxies do) had
+     * invented numbers written against the user's limit, the model's daily
+     * stats and the cost report — silently, and wrong in both directions.
+     */
+    if (totalInputTokens === 0 && totalOutputTokens === 0) {
+      console.warn(
+        `[sendMessage] ${resolved.provider}/${resolved.modelName} reported no token usage; recording zero rather than estimating`,
+      );
     }
 
     // Save assistant message with tool call log
@@ -681,8 +804,8 @@ Return ONLY a JSON array of 3 strings.`;
       role: 'assistant',
       content: finalText,
       toolCallsJson: toolCallsLog.length > 0 ? JSON.stringify(toolCallsLog) : undefined,
-      inputTokens: totalInputTokens || 500,
-      outputTokens: totalOutputTokens || 300,
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
     });
 
     // Log token usage via recordTokenUsage (updates user counters + model daily stats)
@@ -692,8 +815,8 @@ Return ONLY a JSON array of 3 strings.`;
       sessionId,
       model: resolved,
       feature: 'chat',
-      inputTokens: totalInputTokens || 500,
-      outputTokens: totalOutputTokens || 300,
+      inputTokens: totalInputTokens,
+      outputTokens: totalOutputTokens,
     });
 
     // Auto-title session from first message
@@ -720,6 +843,186 @@ Return ONLY a JSON array of 3 strings.`;
     };
   },
 
+  /**
+   * Streaming counterpart of `sendMessage`.
+   *
+   * Same tool loop, same persistence, same fact extraction — the only
+   * difference is that text reaches the caller as it is produced instead of
+   * 10–20 seconds later. Everything that must happen exactly once (saving the
+   * message, recording tokens, titling the session) happens here after the
+   * stream completes, so a client that disconnects mid-reply still leaves the
+   * session consistent.
+   */
+  async *streamMessage(
+    userId: string,
+    sessionId: string,
+    userMessage: string,
+    petId?: string,
+    authToken?: string,
+    image?: ChatImage,
+  ): AsyncGenerator<ChatStreamEvent, void, unknown> {
+    const limitCheck = await checkUserTokenLimit(userId);
+    if (!limitCheck.allowed) throw new ValidationError(limitCheck.reason ?? 'Token limit reached');
+
+    const session = await AiModel.getSession(userId, sessionId);
+    if (!session) throw new ValidationError('Session not found');
+
+    const activePetId = petId ?? session.petId ?? undefined;
+    const purpose: AiPurpose = (session as any).isAdminSession ? 'admin_assistant' : 'general_chat';
+    const resolved = await getModelForPurpose(purpose);
+
+    /**
+     * Not every chat model can see.
+     *
+     * The chat model is admin-configurable, and a text-only one (DeepSeek, most
+     * local Ollama models) rejects a multimodal message outright — the user
+     * would get a raw provider error for attaching a photo. So when the chat
+     * model isn't vision-capable, the image goes to the model configured for
+     * the `vision` purpose instead and its description is folded into the
+     * message. The conversation still "sees" the photo either way.
+     */
+    let visionNote = '';
+    let inlineImage = image;
+    if (image && !modelSupportsVision(resolved)) {
+      inlineImage = undefined;
+      try {
+        const visionModel = await getModelForPurpose('vision');
+        const seen = await analyzePetImage(image.base64, image.mimeType, visionModel);
+        visionNote = `\n\n[The user attached a photo. Image analysis: ${seen.rawAnalysis}${
+          seen.petType !== 'not_animal' ? ` Detected: ${seen.breed} (${seen.petType}), ${seen.color}, ${seen.estimatedAge}.` : ''
+        }]`;
+      } catch (e: any) {
+        console.warn('[streamMessage] vision fallback failed:', e?.message ?? e);
+        visionNote = '\n\n[The user attached a photo, but it could not be analysed.]';
+      }
+    }
+
+    // The image itself is not stored on the message — a base64 photo in a chat
+    // row would bloat every history read — so the transcript records that one
+    // was sent.
+    await AiModel.saveMessage({
+      sessionId,
+      role: 'user',
+      content: image ? `${userMessage}\n[user attached a photo]` : userMessage,
+    });
+
+    const history = await AiModel.getMessages(sessionId);
+    const recentHistory = history.slice(-CONTEXT_WINDOW);
+    const summary = await updateSessionSummary(session as any, history);
+    const basePrompt = await buildSystemPrompt(userId, activePetId);
+    // Earlier turns that no longer fit the window, carried forward so the
+    // thread survives a long conversation.
+    const systemPrompt = summary
+      ? `${basePrompt}\n\n[EARLIER IN THIS CONVERSATION]\n${summary}\n[END EARLIER]`
+      : basePrompt;
+    const copy = fallbackCopy(userMessage);
+
+    const priorTurns = recentHistory
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(0, -1)
+      .map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.role === 'assistant' ? withToolNote(m.content ?? '', m.toolCallsJson) : m.content ?? '',
+      }));
+
+    let finalMessage = '';
+    let toolCalls: { tool: string; args: unknown; result: string }[] = [];
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    for await (const event of streamChatTurn({
+      resolved,
+      systemPrompt,
+      priorTurns,
+      userMessage: userMessage + visionNote,
+      image: inlineImage,
+      userId,
+      authToken,
+      budgetExhausted: async () => !(await checkUserTokenLimit(userId)).allowed,
+    })) {
+      if (event.type === 'done') {
+        finalMessage = event.message;
+        toolCalls = event.toolCalls;
+        inputTokens = event.inputTokens;
+        outputTokens = event.outputTokens;
+      } else {
+        yield event;
+      }
+    }
+
+    // Same wrap-up as the blocking path: tools may have run without the model
+    // ever writing an answer, and saying "I couldn't help" after changing the
+    // user's data would be a lie.
+    if (!finalMessage && toolCalls.length > 0) {
+      try {
+        const recap = toolCalls
+          .map((t) => `- ${t.tool}(${JSON.stringify(t.args ?? {})}) -> ${String(t.result).slice(0, 500)}`)
+          .join('\n');
+        const wrapUp = await generateText(
+          resolved,
+          `${systemPrompt}\n\nThe user said: "${userMessage}"\n\nYou already performed these actions and got these results:\n${recap}\n\nWrite the reply to the user now. Confirm what you did, in their language.`,
+          1024,
+        );
+        finalMessage = wrapUp.text.trim();
+        inputTokens += wrapUp.inputTokens;
+        outputTokens += wrapUp.outputTokens;
+        if (finalMessage) yield { type: 'delta', text: finalMessage };
+      } catch (e: any) {
+        console.warn('[streamMessage] wrap-up failed:', e?.message ?? e);
+      }
+      if (!finalMessage) {
+        finalMessage = `${copy.didActions}\n${toolCalls.map((t) => `• ${t.tool}`).join('\n')}`;
+        yield { type: 'delta', text: finalMessage };
+      }
+    }
+
+    if (!finalMessage) {
+      finalMessage = copy.failed;
+      yield { type: 'delta', text: finalMessage };
+    }
+
+    await AiModel.saveMessage({
+      sessionId,
+      role: 'assistant',
+      content: finalMessage,
+      toolCallsJson: toolCalls.length > 0 ? JSON.stringify(toolCalls) : undefined,
+      inputTokens,
+      outputTokens,
+    });
+
+    await recordTokenUsage({
+      userId,
+      petId: activePetId,
+      sessionId,
+      model: resolved,
+      feature: 'chat',
+      inputTokens,
+      outputTokens,
+    });
+
+    if (history.length <= 1) {
+      await AiModel.updateSessionTitle(sessionId, userMessage.slice(0, 60));
+    }
+
+    if (activePetId && finalMessage) {
+      void PetProfileService.extractFactsFromMessage({
+        userId,
+        petId: activePetId,
+        sessionId,
+        userText: userMessage,
+        assistantText: finalMessage,
+      });
+    }
+
+    yield {
+      type: 'done',
+      message: finalMessage,
+      toolCalls,
+      inputTokens,
+      outputTokens,
+    };
+  },
+
   // ─── Proactive daily check-in ─────────────────────────────────────────────
 
   /**
@@ -727,37 +1030,66 @@ Return ONLY a JSON array of 3 strings.`;
    * using its profile + learned facts (Phase 2 memory). Falls back to a simple
    * pet-name greeting if the model call fails (quota/network) — never throws.
    */
-  async generateProactiveCheckin(userId: string, petId?: string, petName?: string): Promise<string> {
-    const fallback = petName
-      ? `${petName} আজ কেমন আছে? কিছু জানালে আমি ওর যত্নে সাহায্য করতে পারি।`
-      : `তোমার পোষা প্রাণী আজ কেমন আছে? কিছু জানালে আমি সাহায্য করতে পারি।`;
+  /**
+   * Write one proactive message in the assistant's own voice, using everything
+   * known about the pet.
+   *
+   * Every self-initiated message in the app funnels through here — check-ins,
+   * missed-task nudges, symptom follow-ups, weekly reviews. Templates could not
+   * say "Bruno's kidney diet means the evening dose matters more than most";
+   * this can. `fallback` is always a complete, sendable message, because the
+   * model may be unconfigured, rate-limited, or simply down and the owner still
+   * deserves the reminder.
+   */
+  async generateProactiveMessage(opts: {
+    userId: string;
+    petId?: string;
+    /** What to say, in plain instructions. Appended to the pet context prompt. */
+    task: string;
+    fallback: string;
+    /** Token-accounting label. */
+    feature: string;
+  }): Promise<string> {
     try {
       const resolved = await getModelForPurpose('general_chat');
-      if (resolved.provider !== 'google' || !resolved.apiKey) return fallback;
+      // Used to bail unless the provider was Google, so switching the model to
+      // Anthropic or OpenAI in the admin panel quietly replaced every
+      // AI-written message with a canned template.
+      if (!resolved.apiKey) return opts.fallback;
 
-      const context = await buildSystemPrompt(userId, petId);
+      const context = await buildSystemPrompt(opts.userId, opts.petId);
       const prompt = `${context}
 
-TASK: Write ONE proactive daily check-in opening message to the pet owner, as if you (their AI pet assistant) are reaching out first to see how the pet is doing today. Use what you know about the pet (name, profile, facts) to make it personal and specific. Keep it warm and short (1-2 sentences). Ask an open question that invites them to share an update. Respond in the user's language (Bengali if their data is Bengali). Return ONLY the message text — no quotes, no preamble.`;
+TASK: ${opts.task}
 
-      const genAI = new GoogleGenerativeAI(resolved.apiKey);
-      const model = genAI.getGenerativeModel({ model: resolved.modelName });
-      const result = await model.generateContent(prompt);
-      const text = (result.response.text() ?? '').trim();
-      const usage = result.response.usageMetadata;
+Keep it warm and short (1-2 sentences), personal to this pet, and respond in the user's language (Bengali if their data is Bengali). Return ONLY the message text — no quotes, no preamble.`;
+
+      const { text, inputTokens, outputTokens } = await generateText(resolved, prompt, 512);
       await recordTokenUsage({
-        userId,
-        petId,
+        userId: opts.userId,
+        petId: opts.petId,
         model: resolved,
-        feature: 'proactive_checkin',
-        inputTokens: usage?.promptTokenCount ?? 200,
-        outputTokens: usage?.candidatesTokenCount ?? 60,
+        feature: opts.feature,
+        inputTokens,
+        outputTokens,
       });
-      return text || fallback;
+      return text.trim() || opts.fallback;
     } catch (e: any) {
-      console.warn('[generateProactiveCheckin] failed, using fallback:', e?.message ?? e);
-      return fallback;
+      console.warn(`[${opts.feature}] AI copy failed, using fallback:`, e?.message ?? e);
+      return opts.fallback;
     }
+  },
+
+  async generateProactiveCheckin(userId: string, petId?: string, petName?: string): Promise<string> {
+    return this.generateProactiveMessage({
+      userId,
+      petId,
+      feature: 'proactive_checkin',
+      fallback: petName
+        ? `${petName} আজ কেমন আছে? কিছু জানালে আমি ওর যত্নে সাহায্য করতে পারি।`
+        : `তোমার পোষা প্রাণী আজ কেমন আছে? কিছু জানালে আমি সাহায্য করতে পারি।`,
+      task: 'Write ONE proactive daily check-in opening message to the pet owner, as if you (their AI pet assistant) are reaching out first to see how the pet is doing today. Use what you know about the pet (name, profile, facts) to make it personal and specific. Ask an open question that invites them to share an update.',
+    });
   },
 
   // ─── Care Plan ──────────────────────────────────────────────────────────

@@ -1,8 +1,25 @@
+/**
+ * Scheduled push delivery (BullMQ over Redis).
+ *
+ * Task pushes are **bundled per user, per 10-minute slot**, not sent per task.
+ * The job id carries the slot (`task_digest-<userId>-<bucketStart>`), so five
+ * tasks due at 08:00 collapse into one job — and therefore one notification —
+ * without any extra bookkeeping. Scheduling is idempotent: re-running it for
+ * any task in a slot just recomputes that slot.
+ *
+ * Follow-ups are capped. An unfinished task gets at most
+ * `taskEscalationLimit` (default 2) reminder pushes, after which the app stops
+ * buzzing and `task-checker` hands the thread to the AI chat instead.
+ */
+
 import { Queue, Worker, type ConnectionOptions } from 'bullmq';
-import { and, eq, gte, lte } from 'drizzle-orm';
+import { and, asc, eq, gte, isNull, lt, lte } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { pets, reminders, taskReminderLogs, tasks } from '@/shared/db/schema';
-import { NotificationsService } from '@/modules/notifications/service';
+import { pets, reminders, taskReminderLogs, tasks, users } from '@/shared/db/schema';
+import { CaregiversModel } from '@/modules/caregivers/model';
+import { NotificationsService, type PushPayload } from '@/modules/notifications/service';
+import { deliverToUser } from '@/modules/notifications/deliver';
+import { getPreferenceContext, priorityForTaskType, type NotificationPriority } from '@/modules/notifications/preferences';
 
 const redisUrl = String(process.env.REDIS_URL ?? '').trim() || 'redis://localhost:6379';
 const parsed = new URL(redisUrl);
@@ -35,147 +52,341 @@ const upsertJob = async (jobId: string, name: string, data: Record<string, unkno
   await notificationsQueue.add(name, data, { jobId, delay });
 };
 
-const REMINDER_MINUTES = [10, 20] as const;
-
-export const scheduleTaskDuePush = async (taskId: string) => {
-  const row = await db
-    .select({
-      id: tasks.id,
-      userId: tasks.userId,
-      title: tasks.title,
-      taskType: tasks.taskType,
-      dueDate: tasks.dueDate,
-      isCompleted: tasks.isCompleted,
-    })
-    .from(tasks)
-    .where(eq(tasks.id, taskId))
-    .limit(1);
-
-  const task = row[0];
-  if (!task) return;
-  if (task.isCompleted) {
-    const job = await notificationsQueue.getJob(`task_due-${taskId}`);
-    if (job) {
-      try {
-        await job.remove();
-      } catch {}
-    }
-    return;
-  }
-
-  const due = new Date(task.dueDate as any);
-  const delayMs = due.getTime() - Date.now();
-  await upsertJob(
-    `task_due-${taskId}`,
-    'task_due',
-    {
-      taskId: String(task.id),
-      userId: String(task.userId),
-      title: String(task.title),
-      taskType: String(task.taskType),
-      dueDate: due.toISOString(),
-    },
-    delayMs,
-  );
-
-  await scheduleTaskReminderJobs(task.id, due);
+const removeJob = async (jobId: string) => {
+  const job = await notificationsQueue.getJob(jobId);
+  if (!job) return;
+  try {
+    await job.remove();
+  } catch {}
 };
 
-export const unscheduleTaskDuePush = async (taskId: string) => {
-  const job = await notificationsQueue.getJob(`task_due-${taskId}`);
-  if (job) {
-    try {
-      await job.remove();
-    } catch {}
-  }
+// ── Task digest bundling ───────────────────────────────────────────────────
+
+/** Tasks due within the same slot are announced together. */
+const DIGEST_BUCKET_MS = 10 * 60 * 1000;
+
+/**
+ * Minutes after the slot's due time at which unfinished tasks are chased.
+ * Step N only fires when the user's `taskEscalationLimit` is at least N, so a
+ * user who sets the limit to 0 is never nagged at all.
+ */
+const ESCALATION_STEPS_MIN = [15, 60] as const;
+
+/**
+ * When a *critical* task (a dose, a vaccine) is still open this long after it
+ * was due, the household is told. One person can forget medication; a second
+ * pair of eyes is the whole reason shared care exists. Non-critical tasks never
+ * reach anybody but the owner.
+ */
+const CAREGIVER_ALERT_MIN = 120;
+
+const bucketStartOf = (due: Date) => Math.floor(due.getTime() / DIGEST_BUCKET_MS) * DIGEST_BUCKET_MS;
+
+const digestJobId = (userId: string, bucketStart: number) => `task_digest-${userId}-${bucketStart}`;
+const escalateJobId = (userId: string, bucketStart: number, step: number) =>
+  `task_escalate-${userId}-${bucketStart}-${step}`;
+const caregiverJobId = (userId: string, bucketStart: number) => `task_caregiver-${userId}-${bucketStart}`;
+
+type BucketTask = {
+  id: string;
+  userId: string;
+  petId: string | null;
+  petName: string | null;
+  title: string;
+  taskType: string | null;
+  dueDate: Date;
 };
 
-const scheduleTaskReminderJobs = async (taskId: string, dueDate: Date) => {
-  for (const min of REMINDER_MINUTES) {
-    const jobId = `task_reminder_${min}-${taskId}`;
-    const fireAt = new Date(dueDate.getTime() + min * 60_000);
-    const delayMs = fireAt.getTime() - Date.now();
-    if (delayMs <= 0) continue;
-    await upsertJob(
-      jobId,
-      `task_reminder`,
-      {
-        taskId,
-        reminderMinutes: min,
-        dueDate: dueDate.toISOString(),
-        fireAt: fireAt.toISOString(),
-      },
-      delayMs,
-    );
-  }
-};
-
-export const unscheduleAllTaskReminderJobs = async (taskId: string) => {
-  for (const min of REMINDER_MINUTES) {
-    const job = await notificationsQueue.getJob(`task_reminder_${min}-${taskId}`);
-    if (job) {
-      try {
-        await job.remove();
-      } catch {}
-    }
-  }
-};
-
-const handleTaskReminderJob = async (taskId: string, reminderMinutes: number, dueDate: string) => {
-  if (!taskId) return;
-
+/** Every still-open task the user has in one slot, oldest first. */
+const openTasksInBucket = async (userId: string, bucketStart: number): Promise<BucketTask[]> => {
   const rows = await db
     .select({
       id: tasks.id,
       userId: tasks.userId,
-      title: tasks.title,
-      taskType: tasks.taskType,
       petId: tasks.petId,
       petName: pets.name,
-      isCompleted: tasks.isCompleted,
+      title: tasks.title,
+      taskType: tasks.taskType,
       dueDate: tasks.dueDate,
     })
     .from(tasks)
-    .innerJoin(pets, eq(tasks.petId, pets.id))
-    .where(eq(tasks.id, taskId))
-    .limit(1);
+    .leftJoin(pets, eq(tasks.petId, pets.id))
+    .where(
+      and(
+        eq(tasks.userId, userId),
+        eq(tasks.isCompleted, false),
+        // A deliberately skipped task must stop nagging like a completed one.
+        isNull(tasks.skippedAt),
+        gte(tasks.dueDate, new Date(bucketStart)),
+        lt(tasks.dueDate, new Date(bucketStart + DIGEST_BUCKET_MS)),
+      ),
+    )
+    .orderBy(asc(tasks.dueDate));
 
-  const t = rows[0];
-  if (!t) return;
-  if (t.isCompleted) return;
-  if (dueDate && new Date(t.dueDate as any).toISOString() !== dueDate) return;
+  return rows.map((r) => ({ ...r, dueDate: new Date(r.dueDate as any) })) as BucketTask[];
+};
 
-  const petName = String(t.petName ?? '');
-  const taskType = String(t.taskType ?? '').toLowerCase();
-  const result = await NotificationsService.sendToUsers(
-    [String(t.userId)],
-    {
-      title: petName ? `${petName}'s ${taskType} is overdue` : `"${String(t.title)}" is overdue`,
-      body: `${reminderMinutes} minutes overdue — please complete "${String(t.title)}"`,
-      data: { taskId: String(t.id), event: `task_reminder_${reminderMinutes}`, reminderMinutes: String(reminderMinutes) },
-      type: `TASK_REMINDER`,
-    },
-    { targetMode: 'single' },
+/**
+ * Recompute one user's slot: schedule the bundled push and its follow-ups, or
+ * clear them when nothing is left open. Safe to call as often as you like.
+ */
+const refreshTaskBucket = async (userId: string, bucketStart: number) => {
+  const open = await openTasksInBucket(userId, bucketStart);
+
+  if (!open.length) {
+    await removeJob(digestJobId(userId, bucketStart));
+    for (let step = 1; step <= ESCALATION_STEPS_MIN.length; step++) {
+      await removeJob(escalateJobId(userId, bucketStart, step));
+    }
+    await removeJob(caregiverJobId(userId, bucketStart));
+    return;
+  }
+
+  // Fire when the *last* task in the slot is actually due, so nothing is
+  // announced early. The slot is 10 minutes wide, so nothing is late by more.
+  const fireAt = open.reduce((max, t) => (t.dueDate > max ? t.dueDate : max), open[0].dueDate);
+
+  await upsertJob(
+    digestJobId(userId, bucketStart),
+    'task_digest',
+    { userId, bucketStart },
+    fireAt.getTime() - Date.now(),
   );
 
-  try {
-    await db.insert(taskReminderLogs).values({
-      taskId: String(t.id),
-      userId: String(t.userId),
-      reminderStep: reminderMinutes === 10 ? 1 : 2,
-      stepLabel: reminderMinutes === 10 ? 'FIRST_REMINDER' : 'SECOND_REMINDER',
-      taskTitle: String(t.title),
-      taskType: String(t.taskType),
-      taskDueDate: new Date(t.dueDate as any),
-      minutesSinceDue: reminderMinutes,
-      wasCompleted: false,
-      pushSent: result.sent > 0,
-      pushDelivered: result.sent > 0,
-      pushSuccessCount: result.sent,
-      pushFailureCount: result.failed,
+  for (let i = 0; i < ESCALATION_STEPS_MIN.length; i++) {
+    const step = i + 1;
+    const at = fireAt.getTime() + ESCALATION_STEPS_MIN[i] * 60_000;
+    const delay = at - Date.now();
+    if (delay <= 0) continue;
+    await upsertJob(escalateJobId(userId, bucketStart, step), 'task_escalate', { userId, bucketStart, step }, delay);
+  }
+
+  // Only worth queueing when something in the slot actually matters.
+  if (open.some((t) => priorityForTaskType(t.taskType) === 'critical')) {
+    const at = fireAt.getTime() + CAREGIVER_ALERT_MIN * 60_000;
+    if (at > Date.now()) {
+      await upsertJob(caregiverJobId(userId, bucketStart), 'task_caregiver', { userId, bucketStart }, at - Date.now());
+    }
+  } else {
+    await removeJob(caregiverJobId(userId, bucketStart));
+  }
+};
+
+/**
+ * Bring a task's notifications in line with its current state.
+ *
+ * Called on create, update, complete and delete. On delete the caller passes
+ * the row it just removed — the slot is recomputed from what remains.
+ */
+export const syncTaskSchedule = async (userId: string, dueDate: Date | string) => {
+  const due = dueDate instanceof Date ? dueDate : new Date(dueDate);
+  if (Number.isNaN(due.getTime())) return;
+  await refreshTaskBucket(userId, bucketStartOf(due));
+};
+
+/** Convenience wrapper for callers that only hold a task id. */
+export const scheduleTaskDuePush = async (taskId: string) => {
+  const [row] = await db
+    .select({ userId: tasks.userId, dueDate: tasks.dueDate })
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .limit(1);
+  if (!row) return;
+  await syncTaskSchedule(String(row.userId), new Date(row.dueDate as any));
+};
+
+// ── Copy ───────────────────────────────────────────────────────────────────
+
+const petLabel = (t: BucketTask) => String(t.petName ?? '').trim();
+
+const listTitles = (list: BucketTask[], max = 3) => {
+  const shown = list.slice(0, max).map((t) => t.title);
+  const rest = list.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')} +${rest} more` : shown.join(', ');
+};
+
+/** One notification covering everything open in the slot. */
+const digestCopy = (list: BucketTask[], overdueMinutes = 0) => {
+  const petNames = [...new Set(list.map(petLabel).filter(Boolean))];
+  const single = list.length === 1;
+  const late = overdueMinutes > 0;
+
+  if (single) {
+    const t = list[0];
+    const pet = petLabel(t);
+    const type = String(t.taskType ?? '').toLowerCase();
+    const title = late
+      ? pet
+        ? `${pet}'s ${type || 'task'} is still open`
+        : `"${t.title}" is still open`
+      : pet
+        ? `Time for ${pet}'s ${type || 'task'}`
+        : `"${t.title}" is due now`;
+    const body = late ? `${overdueMinutes} min overdue — ${t.title}` : t.title;
+    return { title, body };
+  }
+
+  const who = petNames.length === 1 ? petNames[0] : `${petNames.length} pets`;
+  const title = late
+    ? `${list.length} care tasks still open`
+    : petNames.length === 1
+      ? `${who} has ${list.length} things due`
+      : `${list.length} care tasks due now`;
+  return { title, body: listTitles(list) };
+};
+
+const highestPriority = (list: BucketTask[]): NotificationPriority =>
+  list.some((t) => priorityForTaskType(t.taskType) === 'critical') ? 'critical' : 'normal';
+
+/**
+ * Payload data the mobile app reads.
+ *
+ * `taskId` is only set for a single-task notification — that is what enables
+ * the Done / Snooze action buttons. A bundle carries `taskIds` and opens the
+ * task list instead, because no single action would be correct.
+ */
+const taskPushData = (list: BucketTask[], event: string, extra: Record<string, string> = {}) => ({
+  event,
+  count: String(list.length),
+  taskIds: list.map((t) => t.id).join(','),
+  ...(list.length === 1 ? { taskId: list[0].id, petId: String(list[0].petId ?? '') } : {}),
+  ...extra,
+});
+
+// ── Job handlers ───────────────────────────────────────────────────────────
+
+const handleTaskDigest = async (userId: string, bucketStart: number) => {
+  const open = await openTasksInBucket(userId, bucketStart);
+  if (!open.length) return;
+
+  const { prefs } = await getPreferenceContext(userId);
+
+  // Bundling off means the user asked for one notification per task.
+  const groups = prefs.digestEnabled ? [open] : open.map((t) => [t]);
+
+  for (const group of groups) {
+    const { title, body } = digestCopy(group);
+    await deliverToUser(userId, {
+      title,
+      body,
+      type: 'TASK_DUE',
+      priority: highestPriority(group),
+      data: taskPushData(group, 'task_due'),
     });
+  }
+};
+
+const handleTaskEscalation = async (userId: string, bucketStart: number, step: number) => {
+  const { prefs } = await getPreferenceContext(userId);
+  if (step > prefs.taskEscalationLimit) return;
+
+  const open = await openTasksInBucket(userId, bucketStart);
+  if (!open.length) return;
+
+  const minutesLate = ESCALATION_STEPS_MIN[step - 1] ?? 0;
+  const { title, body } = digestCopy(open, minutesLate);
+
+  const result = await deliverToUser(userId, {
+    title,
+    body,
+    type: 'TASK_REMINDER',
+    priority: highestPriority(open),
+    data: taskPushData(open, `task_reminder_${minutesLate}`, { minutesOverdue: String(minutesLate) }),
+  });
+
+  try {
+    await db.insert(taskReminderLogs).values(
+      open.map((t) => ({
+        taskId: t.id,
+        userId,
+        reminderStep: step,
+        stepLabel: step === 1 ? 'FIRST_REMINDER' : 'SECOND_REMINDER',
+        taskTitle: t.title,
+        taskType: t.taskType ?? undefined,
+        taskDueDate: t.dueDate,
+        minutesSinceDue: minutesLate,
+        wasCompleted: false,
+        pushSent: result.outcome === 'sent',
+        pushDelivered: result.sent > 0,
+        pushSuccessCount: result.sent,
+        pushFailureCount: result.failed,
+      })),
+    );
   } catch {}
 };
+
+/**
+ * Tell the household about a critical task the owner has not done.
+ *
+ * Sent to each caregiver through `deliverToUser`, so their own quiet hours and
+ * category switches still apply — being somebody's backup does not mean losing
+ * control of your own phone.
+ */
+const handleCaregiverAlert = async (userId: string, bucketStart: number) => {
+  const open = (await openTasksInBucket(userId, bucketStart)).filter(
+    (t) => priorityForTaskType(t.taskType) === 'critical' && t.petId,
+  );
+  if (!open.length) return;
+
+  const byPet = new Map<string, BucketTask[]>();
+  for (const task of open) {
+    const list = byPet.get(task.petId!) ?? [];
+    list.push(task);
+    byPet.set(task.petId!, list);
+  }
+
+  const recipients = await CaregiversModel.alertRecipientsForPets([...byPet.keys()]);
+  if (![...recipients.values()].some((list) => list.length)) return;
+
+  const [owner] = await db
+    .select({ firstName: users.firstName })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  const ownerName = owner?.firstName?.trim() || 'The owner';
+
+  for (const [petId, list] of byPet) {
+    const helpers = (recipients.get(petId) ?? []).filter((id) => id !== userId);
+    if (!helpers.length) continue;
+
+    const petName = petLabel(list[0]) || 'the pet';
+    const body =
+      list.length === 1
+        ? `${ownerName} hasn't marked "${list[0].title}" done. Can you check on ${petName}?`
+        : `${ownerName} hasn't marked ${list.length} health tasks done. Can you check on ${petName}?`;
+
+    for (const helperId of helpers) {
+      await deliverToUser(helperId, {
+        title: `${petName} needs a hand`,
+        body,
+        type: 'HEALTH_ALERT',
+        priority: 'critical',
+        data: { event: 'caregiver_alert', petId, taskIds: list.map((t) => t.id).join(',') },
+      });
+    }
+  }
+};
+
+// ── Quiet-hours deferral ───────────────────────────────────────────────────
+
+/** Stable-ish key so re-deferring the same event replaces it instead of piling up. */
+const deferralKey = (payload: PushPayload) => {
+  const data = payload.data ?? {};
+  const marker = data.taskId || data.taskIds || data.reminderId || data.petId || payload.title;
+  return `${payload.type ?? 'SYSTEM'}-${String(marker).slice(0, 60)}`.replace(/[^A-Za-z0-9_.:-]/g, '_');
+};
+
+/** Hold a push until the user's quiet window ends. Called by `deliverToUser`. */
+export const enqueueDeferredPush = async (userId: string, payload: PushPayload, at: Date) => {
+  await upsertJob(
+    `deferred_push-${userId}-${deferralKey(payload)}`,
+    'deferred_push',
+    { userId, payload: payload as unknown as Record<string, unknown> },
+    at.getTime() - Date.now(),
+  );
+};
+
+// ── Reminders (unchanged scheduling model, one row = one notification) ──────
 
 const parseTimeToMinutes = (input: string): number | null => {
   const raw = input.trim();
@@ -235,16 +446,17 @@ const nextReminderOccurrence = (reminder: {
   const createdAt = reminder.createdAt ? new Date(reminder.createdAt) : null;
 
   const todayAt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+  const tomorrowAt = new Date(todayAt.getTime() + 24 * 60 * 60_000);
 
   if (freq.includes('once') || freq.includes('one')) {
     if (dateOnly) return new Date(dateOnly.getFullYear(), dateOnly.getMonth(), dateOnly.getDate(), hour, minute, 0, 0);
-    return todayAt > now ? todayAt : new Date(todayAt.getTime() + 24 * 60_000 * 60);
+    return todayAt > now ? todayAt : tomorrowAt;
   }
 
   if (freq.includes('weekly')) {
     const base = dateOnly ?? createdAt ?? now;
     const targetDow = base.getDay();
-    let out = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+    const out = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
     const delta = (targetDow - out.getDay() + 7) % 7;
     if (delta !== 0) out.setDate(out.getDate() + delta);
     if (out <= now) out.setDate(out.getDate() + 7);
@@ -259,8 +471,7 @@ const nextReminderOccurrence = (reminder: {
     return out;
   }
 
-  const out = todayAt > now ? todayAt : new Date(todayAt.getTime() + 24 * 60_000 * 60);
-  return out;
+  return todayAt > now ? todayAt : tomorrowAt;
 };
 
 export const scheduleReminderDuePush = async (reminderId: string) => {
@@ -284,12 +495,7 @@ export const scheduleReminderDuePush = async (reminderId: string) => {
   const reminder = rows[0];
   if (!reminder) return;
   if (!reminder.isActive || reminder.isCompleted) {
-    const job = await notificationsQueue.getJob(`reminder_due-${reminderId}`);
-    if (job) {
-      try {
-        await job.remove();
-      } catch {}
-    }
+    await removeJob(`reminder_due-${reminderId}`);
     return;
   }
 
@@ -311,12 +517,10 @@ export const scheduleReminderDuePush = async (reminderId: string) => {
 };
 
 export const unscheduleReminderDuePush = async (reminderId: string) => {
-  const job = await notificationsQueue.getJob(`reminder_due-${reminderId}`);
-  if (!job) return;
-  try {
-    await job.remove();
-  } catch {}
+  await removeJob(`reminder_due-${reminderId}`);
 };
+
+// ── Bootstrap & worker ─────────────────────────────────────────────────────
 
 let workerStarted = false;
 
@@ -326,13 +530,24 @@ export const bootstrapNotificationSchedules = async () => {
   const recent = new Date(now.getTime() - 5 * 60_000);
 
   const taskRows = await db
-    .select({ id: tasks.id })
+    .select({ userId: tasks.userId, dueDate: tasks.dueDate })
     .from(tasks)
-    .where(and(eq(tasks.isCompleted, false), gte(tasks.dueDate, recent), lte(tasks.dueDate, horizon)));
+    .where(
+      and(
+        eq(tasks.isCompleted, false),
+        isNull(tasks.skippedAt),
+        gte(tasks.dueDate, recent),
+        lte(tasks.dueDate, horizon),
+      ),
+    );
 
-  for (const t of taskRows) {
+  // One refresh per (user, slot) — the whole point of bucketing is that the
+  // per-task fan-out disappears here too.
+  const buckets = new Set(taskRows.map((t) => `${t.userId}|${bucketStartOf(new Date(t.dueDate as any))}`));
+  for (const key of buckets) {
+    const [userId, bucket] = key.split('|');
     try {
-      await scheduleTaskDuePush(String(t.id));
+      await refreshTaskBucket(userId, Number(bucket));
     } catch {}
   }
 
@@ -355,62 +570,45 @@ export const startNotificationsWorker = () => {
   new Worker(
     queueName,
     async (job) => {
-      if (job.name === 'task_due') {
-        const taskId = String((job.data as any)?.taskId ?? '');
-        const userId = String((job.data as any)?.userId ?? '');
-        const title = String((job.data as any)?.title ?? 'Task');
-        const dueDate = String((job.data as any)?.dueDate ?? '');
+      const data = (job.data ?? {}) as Record<string, any>;
 
-        if (!taskId || !userId) return;
-
-        const rows = await db
-          .select({
-            id: tasks.id,
-            userId: tasks.userId,
-            title: tasks.title,
-            taskType: tasks.taskType,
-            petId: tasks.petId,
-            petName: pets.name,
-            dueDate: tasks.dueDate,
-            isCompleted: tasks.isCompleted,
-          })
-          .from(tasks)
-          .innerJoin(pets, eq(tasks.petId, pets.id))
-          .where(eq(tasks.id, taskId))
-          .limit(1);
-
-        const t = rows[0];
-        if (!t) return;
-        if (t.isCompleted) return;
-        if (dueDate && new Date(t.dueDate as any).toISOString() !== dueDate) return;
-
-        const petName = String(t.petName ?? '');
-        const taskType = String(t.taskType ?? '').toLowerCase();
-        await NotificationsService.sendToUsers(
-          [String(t.userId)],
-          {
-            title: petName ? `Time for ${petName}'s ${taskType}` : `"${String(t.title)}" is due now`,
-            body: `"${String(t.title)}" is due now`,
-            data: { taskId: String(t.id), event: 'task_due' },
-            type: 'TASK_DUE',
-          },
-          { targetMode: 'single' },
-        );
+      if (job.name === 'task_digest') {
+        const userId = String(data.userId ?? '');
+        const bucketStart = Number(data.bucketStart ?? 0);
+        if (!userId || !bucketStart) return;
+        await handleTaskDigest(userId, bucketStart);
         return;
       }
 
-      if (job.name === 'task_reminder') {
-        const taskId = String((job.data as any)?.taskId ?? '');
-        const reminderMinutes = Number((job.data as any)?.reminderMinutes ?? 0);
-        const dueDate = String((job.data as any)?.dueDate ?? '');
-        if (!taskId || !reminderMinutes) return;
-        await handleTaskReminderJob(taskId, reminderMinutes, dueDate);
+      if (job.name === 'task_escalate') {
+        const userId = String(data.userId ?? '');
+        const bucketStart = Number(data.bucketStart ?? 0);
+        const step = Number(data.step ?? 0);
+        if (!userId || !bucketStart || !step) return;
+        await handleTaskEscalation(userId, bucketStart, step);
+        return;
+      }
+
+      if (job.name === 'task_caregiver') {
+        const userId = String(data.userId ?? '');
+        const bucketStart = Number(data.bucketStart ?? 0);
+        if (!userId || !bucketStart) return;
+        await handleCaregiverAlert(userId, bucketStart);
+        return;
+      }
+
+      if (job.name === 'deferred_push') {
+        const userId = String(data.userId ?? '');
+        const payload = data.payload as PushPayload | undefined;
+        if (!userId || !payload?.title) return;
+        // The in-app row was already written when this was deferred.
+        await NotificationsService.sendToUsers([userId], payload, { targetMode: 'single', recordInApp: false });
         return;
       }
 
       if (job.name === 'reminder_due') {
-        const reminderId = String((job.data as any)?.reminderId ?? '');
-        const reminderUpdatedAt = String((job.data as any)?.reminderUpdatedAt ?? '');
+        const reminderId = String(data.reminderId ?? '');
+        const reminderUpdatedAt = String(data.reminderUpdatedAt ?? '');
         if (!reminderId) return;
 
         const rows = await db
@@ -418,12 +616,9 @@ export const startNotificationsWorker = () => {
             id: reminders.id,
             userId: reminders.userId,
             title: reminders.title,
-            reminderTime: reminders.reminderTime,
             frequency: reminders.frequency,
-            reminderDate: reminders.reminderDate,
             isActive: reminders.isActive,
             isCompleted: reminders.isCompleted,
-            createdAt: reminders.createdAt,
             updatedAt: reminders.updatedAt,
           })
           .from(reminders)
@@ -435,15 +630,19 @@ export const startNotificationsWorker = () => {
         if (!r.isActive || r.isCompleted) return;
         if (reminderUpdatedAt && new Date(r.updatedAt as any).toISOString() !== reminderUpdatedAt) return;
 
-        await NotificationsService.sendToUsers(
-          [String(r.userId)],
-          { title: 'Reminder', body: String(r.title), data: { reminderId: String(r.id), event: 'reminder_due' }, type: 'REMINDER_DUE' },
-          { targetMode: 'single' },
-        );
+        await deliverToUser(String(r.userId), {
+          title: 'Reminder',
+          body: String(r.title),
+          data: { reminderId: String(r.id), event: 'reminder_due' },
+          type: 'REMINDER_DUE',
+        });
 
         const freq = getFrequency(r.frequency);
         if (freq.includes('once') || freq.includes('one')) {
-          await db.update(reminders).set({ isCompleted: true, updatedAt: new Date() }).where(and(eq(reminders.id, reminderId), eq(reminders.userId, r.userId)));
+          await db
+            .update(reminders)
+            .set({ isCompleted: true, updatedAt: new Date() })
+            .where(and(eq(reminders.id, reminderId), eq(reminders.userId, r.userId)));
           await unscheduleReminderDuePush(reminderId);
           return;
         }

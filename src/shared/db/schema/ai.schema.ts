@@ -24,6 +24,15 @@ export const aiChatSessions = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     petId: uuid('pet_id').references(() => pets.id, { onDelete: 'set null' }),
     title: varchar('title', { length: 200 }),
+    /**
+     * Rolling summary of the turns that have scrolled out of the context
+     * window. Only the last 20 messages are sent to the model, so without this
+     * a long conversation silently forgets its own beginning — the user has to
+     * repeat what they already said.
+     */
+    summary: text('summary'),
+    /** How many messages the current `summary` already accounts for. */
+    summarizedUpTo: integer('summarized_up_to').default(0).notNull(),
     contextSnapshotJson: text('context_snapshot_json'),
     isAdminSession: boolean('is_admin_session').default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

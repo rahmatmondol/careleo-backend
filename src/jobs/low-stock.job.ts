@@ -14,7 +14,7 @@ import { aiChatSessions, aiChatMessages, aiProactiveMessages } from '@/shared/db
 import { can } from '@/modules/subscriptions/entitlements';
 import { FoodInventoryService, daysRemaining } from '@/modules/food-inventory/service';
 import { FoodInventoryModel } from '@/modules/food-inventory/model';
-import { NotificationsService } from '@/modules/notifications/service';
+import { deliverToUser } from '@/modules/notifications/deliver';
 
 const MAX_PER_RUN = 100;
 
@@ -96,11 +96,13 @@ export async function runLowStockJob(opts: LowStockOptions = {}) {
     });
 
     try {
-      await NotificationsService.sendToUsers(
-        [userId],
-        { title: 'Careleo', body: message, type: 'AI_ASSISTANT' },
-        { targetMode: 'single' },
-      );
+      await deliverToUser(userId, {
+        title: 'Careleo',
+        body: message,
+        type: 'LOW_STOCK',
+        priority: 'low',
+        data: { event: 'low_stock' },
+      });
     } catch (e: any) {
       console.warn('[low-stock] push failed for user', userId, e?.message ?? e);
     }

@@ -1,6 +1,8 @@
 import { desc, eq, inArray } from 'drizzle-orm';
 import { db } from '@/shared/db';
 import { orders, orderItems, products, users } from '@/shared/db/schema';
+import { releaseUsage } from '@/modules/subscriptions/coverage';
+import { safeJsonParse } from '../../utils/common';
 
 const ALLOWED_STATUSES = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'REFUNDED'];
 
@@ -91,6 +93,11 @@ const mapOrder = (
     source: o.source || 'checkout',
     totalAmount: Number(o.totalAmount || 0),
     total: Number(o.totalAmount || 0),
+    // Money split. Orders placed before subscription coverage existed have
+    // zeroes here, so fall back to the total being entirely payable.
+    subtotal: Number(o.subtotal || o.totalAmount || 0),
+    coveredAmount: Number(o.coveredAmount || 0),
+    payableAmount: Number(o.coveredAmount) > 0 ? Number(o.payableAmount || 0) : Number(o.totalAmount || 0),
     status: normalizedStatus,
     paymentMethod: o.paymentMethod || 'Cash on Delivery',
     paymentStatus: o.paymentStatus || 'Unpaid',
@@ -105,6 +112,8 @@ const mapOrder = (
       quantity: Number(it.quantity || 1),
       unitPrice: Number(it.price || 0),
       price: Number(it.price || 0),
+      coveredQuantity: Number(it.coveredQuantity || 0),
+      coveredAmount: Number(it.coveredAmount || 0),
       imageUrl: productsMap[it.productId]?.imageUrl || null,
       sku: productsMap[it.productId]?.sku || null,
     })),
@@ -156,7 +165,43 @@ export async function getOrderById(id: string) {
 export async function updateOrderStatus(id: string, status: string) {
   const normalized = String(status || '').toUpperCase();
   if (!ALLOWED_STATUSES.includes(normalized)) return { error: 'Invalid status', status: 400 };
-  const row = await db.update(orders).set({ status: normalized }).where(eq(orders.id, id)).returning();
+
+  const row = await db.transaction(async (tx) => {
+    const [current] = await tx.select().from(orders).where(eq(orders.id, id)).for('update');
+    if (!current) return [];
+
+    const updated = await tx
+      .update(orders)
+      .set({ status: normalized })
+      .where(eq(orders.id, id))
+      .returning();
+
+    /**
+     * Cancelling an order that a subscription paid for gives the benefit back.
+     * Credited to the period the order actually drew from — by the time a
+     * cancellation arrives the user may already be in a later period, and
+     * crediting that one would hand out budget that was never spent.
+     *
+     * Guarded on the *previous* status so re-saving CANCELLED, or moving
+     * CANCELLED → REFUNDED, cannot refund the same budget twice.
+     */
+    const isNowCancelled = normalized === 'CANCELLED' || normalized === 'REFUNDED';
+    const wasCancelled = current.status === 'CANCELLED' || current.status === 'REFUNDED';
+    const covered = Number(current.coveredAmount ?? 0);
+
+    if (isNowCancelled && !wasCancelled && covered > 0 && current.benefitPeriodStart) {
+      await releaseUsage(
+        tx,
+        current.userId,
+        current.benefitPeriodStart,
+        covered,
+        safeJsonParse<Record<string, number>>(current.coverageMetaJson, {}),
+      );
+    }
+
+    return updated;
+  });
+
   if (!row.length) return { error: 'Order not found', status: 404 };
   const items = await db.select().from(orderItems).where(eq(orderItems.orderId, id));
 

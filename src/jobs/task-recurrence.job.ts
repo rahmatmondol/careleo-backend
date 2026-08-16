@@ -13,7 +13,7 @@
 
 import { TasksModel } from '@/modules/tasks/model';
 import { nextOccurrenceAfter, periodMs } from '@/modules/tasks/recurrence';
-import { scheduleTaskDuePush } from '@/shared/queue';
+import { syncTaskSchedule } from '@/shared/queue';
 
 export async function runTaskRecurrenceJob() {
   const now = new Date();
@@ -34,7 +34,9 @@ export async function runTaskRecurrenceJob() {
 
     try {
       await TasksModel.rollTaskDueDate(task.id, nextDue);
-      await scheduleTaskDuePush(task.id);
+      // Old slot loses the task, new slot gains it.
+      await syncTaskSchedule(String(task.userId), dueDate);
+      await syncTaskSchedule(String(task.userId), nextDue);
       rolled++;
     } catch {
       // One bad row shouldn't stop the sweep.

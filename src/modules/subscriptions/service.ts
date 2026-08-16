@@ -98,6 +98,54 @@ export const SubscriptionsService = {
     return { deleted: true };
   },
 
+  // ── Coverage rules ─────────────────────────────────────────────────────────
+
+  planCoverage: async (planId: string) => {
+    await SubscriptionsService.getPlan(planId); // 404 if missing
+    return { rules: await SubscriptionsModel.listCoverageRules(planId) };
+  },
+
+  /**
+   * Replace a plan's coverage rules.
+   *
+   * Sent as the complete list because the Plan Builder edits it as one list;
+   * per-rule PATCH would need the UI to track adds and deletes separately for
+   * no benefit.
+   */
+  setPlanCoverage: async (planId: string, body: Record<string, unknown>) => {
+    await SubscriptionsService.getPlan(planId);
+
+    const input = Array.isArray(body.rules) ? body.rules : [];
+    const seen = new Set<string>();
+    const rules = input.map((raw) => {
+      const r = (raw ?? {}) as Record<string, unknown>;
+      const scope = String(r.scope ?? '').trim();
+      if (scope !== 'category' && scope !== 'product') {
+        throw new ValidationError('Coverage scope must be "category" or "product"');
+      }
+      const refId = String(r.refId ?? '').trim();
+      if (!refId) throw new ValidationError('Each coverage rule needs a refId');
+
+      // The table has a unique index on (plan, scope, ref); reject duplicates
+      // here so the admin gets a readable message instead of a constraint error.
+      const key = `${scope}:${refId}`;
+      if (seen.has(key)) throw new ValidationError('Duplicate coverage rule for the same item');
+      seen.add(key);
+
+      let monthlyQtyLimit: number | null = null;
+      if (r.monthlyQtyLimit !== null && r.monthlyQtyLimit !== undefined && r.monthlyQtyLimit !== '') {
+        const n = Number(r.monthlyQtyLimit);
+        if (!Number.isFinite(n) || n < 0) throw new ValidationError('Monthly quantity limit must be 0 or more');
+        monthlyQtyLimit = Math.floor(n);
+      }
+
+      return { scope, refId, monthlyQtyLimit };
+    });
+
+    const saved = await SubscriptionsModel.replaceCoverageRules(planId, rules);
+    return { rules: saved };
+  },
+
   // ── User-facing ────────────────────────────────────────────────────────────
   /** The caller's current subscription resolved into a usable entitlement. */
   mySubscription: async (userId: string) => {

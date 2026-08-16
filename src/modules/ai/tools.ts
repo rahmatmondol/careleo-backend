@@ -17,7 +17,13 @@ import { VetsModel } from '@/modules/vets/model';
 import { VaccinationsService } from '@/modules/vaccinations/service';
 import { assessSymptoms } from './symptom-assessment';
 import { PetsService } from '@/modules/pets/service';
-import { can } from '@/modules/subscriptions/entitlements';
+import { CURRENCY_CODE, formatMoney } from '@/shared/types/currency';
+import { can, resolveEntitlement } from '@/modules/subscriptions/entitlements';
+import { resolveCoverage } from '@/modules/subscriptions/coverage';
+import {
+  listOrders as listCustomerOrders,
+  getOrderById as getCustomerOrderById,
+} from '@/modules/shop/services/customer/order.service';
 import type { FeatureKey } from '@/modules/subscriptions/catalog';
 import { listFreelancers, sendJobLetter, autoHireFreelancer } from '@/modules/freelancer/freelancer-client';
 
@@ -123,6 +129,42 @@ export const AI_TOOL_DECLARATIONS = [
       },
       required: ['query'],
     },
+  },
+  /**
+   * Order tools.
+   *
+   * The shop, orders and subscription coverage all had working APIs while the
+   * assistant had no way to reach them — "where is my order?" was simply
+   * unanswerable, which is one of the most common things a customer asks.
+   */
+  {
+    name: 'get_my_orders',
+    description:
+      "List the user's recent orders with status, totals and what their subscription covered. Use for questions like 'where is my order', 'did my order ship', 'what did I buy last week'.",
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'How many recent orders to return (default 5, max 20)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_order_details',
+    description: 'Get the full detail of one order: its items, delivery address, payment method and status.',
+    parameters: {
+      type: 'object',
+      properties: {
+        orderId: { type: 'string', description: 'The order id, or the short reference the user quotes' },
+      },
+      required: ['orderId'],
+    },
+  },
+  {
+    name: 'get_plan_coverage',
+    description:
+      "Explain what the user's subscription pays for in the store and how much of this period's budget is left. Use before recommending a product so you can say whether it is covered, and when the user asks why something was or wasn't free.",
+    parameters: { type: 'object', properties: {}, required: [] },
   },
   // ── Care plan tools ──────────────────────────────────────────────────────
   {
@@ -481,11 +523,124 @@ export async function executeTool(
         const mapped = products.map((p) => ({
           id: p.id,
           name: p.name,
-          price: p.price,
+          price_display: formatMoney(p.price),
           image: p.imageUrl ?? null,
           url: p.slug ? `/products/${p.slug}` : null,
         }));
-        return JSON.stringify({ success: true, products: mapped, query: args.query });
+        return JSON.stringify({
+          success: true,
+          currency: CURRENCY_CODE,
+          products: mapped,
+          query: args.query,
+        });
+      }
+
+      // ── Order tools ───────────────────────────────────────────────────
+      case 'get_my_orders': {
+        const limit = Math.min(20, Math.max(1, Number(args.limit ?? 5)));
+        const { orders } = await listCustomerOrders(userId);
+        return JSON.stringify({
+          success: true,
+          // Stated explicitly, and repeated as formatted strings, because bare
+          // numbers left the model to guess the currency — and in a
+          // Bangladesh-flavoured conversation it guessed ৳ while every screen
+          // showed $.
+          currency: CURRENCY_CODE,
+          displayNote: `Amounts are in ${CURRENCY_CODE}. Use the *_display strings verbatim; never convert or substitute a currency symbol.`,
+          orders: orders.slice(0, limit).map((o: any) => ({
+            // The user quotes the short reference the app shows them, not the uuid.
+            reference: `#${String(o.id).slice(0, 8).toUpperCase()}`,
+            id: o.id,
+            status: o.status,
+            placedAt: o.createdAt,
+            items: o.itemCount,
+            summary: o.previewNames?.[0] ?? null,
+            // `??` is wrong here: orders placed before the subtotal column
+            // existed carry its default of 0.00, not null, so the fallback
+            // never fired and every old order reported a total of zero.
+            total: Number(o.subtotal) || Number(o.totalAmount) || 0,
+            total_display: formatMoney(Number(o.subtotal) || Number(o.totalAmount)),
+            coveredByPlan: Number(o.coveredAmount ?? 0),
+            coveredByPlan_display: formatMoney(o.coveredAmount),
+            youPaid_display: formatMoney(
+              Number(o.coveredAmount) > 0 ? o.payableAmount : o.totalAmount,
+            ),
+            paymentMethod: o.paymentMethod,
+            paymentStatus: o.paymentStatus,
+          })),
+        });
+      }
+
+      case 'get_order_details': {
+        const raw = String(args.orderId ?? '').replace(/^#/, '').trim();
+        const { orders } = await listCustomerOrders(userId);
+        // Accept either a full id or the short reference the app displays.
+        const match = orders.find(
+          (o: any) => o.id === raw || String(o.id).slice(0, 8).toLowerCase() === raw.toLowerCase(),
+        );
+        if (!match) return JSON.stringify({ success: false, message: 'No such order for this user.' });
+
+        const detail: any = await getCustomerOrderById(userId, match.id);
+        if (detail?.error) return JSON.stringify({ success: false, message: detail.error });
+
+        return JSON.stringify({
+          success: true,
+          currency: CURRENCY_CODE,
+          displayNote: `Amounts are in ${CURRENCY_CODE}. Use the *_display strings verbatim; never convert or substitute a currency symbol.`,
+          order: {
+            reference: `#${String(match.id).slice(0, 8).toUpperCase()}`,
+            status: detail.order.status,
+            placedAt: detail.order.createdAt,
+            deliverTo: detail.order.shippingAddress,
+            paymentMethod: detail.order.paymentMethod,
+            paymentStatus: detail.order.paymentStatus,
+            // Same pre-coverage fallback as the list above.
+            total_display: formatMoney(Number(detail.order.subtotal) || Number(detail.order.totalAmount)),
+            coveredByPlan_display: formatMoney(detail.order.coveredAmount),
+            youPaid_display: formatMoney(
+              Number(detail.order.coveredAmount) > 0
+                ? detail.order.payableAmount
+                : detail.order.totalAmount,
+            ),
+            items: detail.items.map((i: any) => ({
+              name: i.productName,
+              quantity: i.quantity,
+              unitPrice_display: formatMoney(i.price),
+              coveredQuantity: Number(i.coveredQuantity ?? 0),
+            })),
+          },
+        });
+      }
+
+      case 'get_plan_coverage': {
+        const entitlement = await resolveEntitlement(userId);
+        const budget = Number(entitlement.limits.monthly_food_budget ?? 0);
+        const supply = entitlement.featureFlags.monthly_food_supply === true;
+
+        if (!supply || budget <= 0) {
+          return JSON.stringify({
+            success: true,
+            currency: CURRENCY_CODE,
+            plan: entitlement.planName,
+            coversStorePurchases: false,
+            message:
+              'This plan does not include a store benefit, so every product is paid for normally. A plan with monthly food supply would cover eligible items.',
+          });
+        }
+
+        // An empty cart still reports the benefit, which is what the AI needs
+        // to answer "what does my plan cover?" before anything is added.
+        const coverage = await resolveCoverage(userId, []);
+        return JSON.stringify({
+          success: true,
+          currency: CURRENCY_CODE,
+          plan: entitlement.planName,
+          coversStorePurchases: true,
+          monthlyBudget_display: formatMoney(budget),
+          remainingThisPeriod_display: formatMoney(coverage.benefit?.remaining ?? budget),
+          periodEnds: coverage.benefit?.periodEnd ?? null,
+          note: 'Only products marked as included in subscription plans, and covered by this plan, are deducted. Anything else is paid normally.',
+        });
       }
 
       // ── Care plan tools ───────────────────────────────────────────────
@@ -674,13 +829,16 @@ export async function executeTool(
         const results = await listFreelancers(String(args.serviceType ?? ''), args.location);
         return JSON.stringify({
           success: true,
+          currency: CURRENCY_CODE,
           freelancers: results.map((f) => ({
             profileId: f.profileId,
             serviceId: f.serviceId,
             name: f.displayName,
             serviceType: f.serviceType,
             title: f.title,
-            price: f.price,
+            // Formatted for the same reason as order totals: a bare number
+            // leaves the model to pick a currency symbol.
+            price_display: formatMoney(f.price),
             billingPeriod: f.billingPeriod,
             location: f.location,
             rating: f.rating,

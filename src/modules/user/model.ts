@@ -1,6 +1,14 @@
 import { eq } from 'drizzle-orm';
 import { db } from '@/shared/db';
 import { users } from '@/shared/db/schema';
+import { isIanaZone } from '@/shared/types/timezone';
+
+/** A finite number inside ±`limit` — anything else is not a coordinate. */
+const isCoordinate = (value: unknown, limit: number): boolean => {
+  if (value === undefined || value === null || value === '') return false;
+  const n = Number(value);
+  return Number.isFinite(n) && Math.abs(n) <= limit;
+};
 
 export const UserModel = {
   /** Get current user profile by user id. */
@@ -23,6 +31,20 @@ export const UserModel = {
         ...(payload.country !== undefined ? { country: payload.country ? String(payload.country) : null } : {}),
         ...(payload.postalCode !== undefined ? { postalCode: payload.postalCode ? String(payload.postalCode) : null } : {}),
         ...(payload.avatarUrl !== undefined ? { avatarUrl: payload.avatarUrl ? String(payload.avatarUrl) : null } : {}),
+        // Only accept a plausible IANA zone ("Area/Location"); the value is
+        // interpolated into `AT TIME ZONE` by the scheduling job.
+        ...(payload.timezone !== undefined && isIanaZone(payload.timezone)
+          ? { timezone: String(payload.timezone) }
+          : {}),
+        // Home coordinates for weather-based care advice. Written only as a
+        // pair, and only when both are in range — a half-set or nonsense
+        // location would just make the advisory job fetch someone else's sky.
+        ...(isCoordinate(payload.latitude, 90) && isCoordinate(payload.longitude, 180)
+          ? {
+              latitude: String(Number(payload.latitude).toFixed(6)),
+              longitude: String(Number(payload.longitude).toFixed(6)),
+            }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(users.id, userId));

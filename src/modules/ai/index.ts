@@ -1,5 +1,6 @@
 import { Elysia } from 'elysia';
 import { requireAuth } from '@/shared/auth/guards';
+import { ValidationError } from '@/shared/errors';
 import { AiService } from './service';
 import { assessSymptoms } from './symptom-assessment';
 
@@ -7,22 +8,42 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
   app
     // ─── Vision: Analyze pet image ─────────────────────────────────────
     .post('/vision/analyze-pet-image', async (ctx: any) => {
-      const { request, headers, jwt } = ctx;
+      const { body, request, headers, jwt } = ctx;
+      const fail = (status: number, error: string) =>
+        new Response(JSON.stringify({ success: false, data: null, error }), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+
       try {
         const user = await requireAuth(headers, jwt);
-        const formData = await request.formData();
-        const file = formData.get('image') as File | null;
 
-        if (!file) {
-          return { success: false, error: 'image file is required', data: null };
+        // Elysia parses multipart bodies itself, so the file is already on
+        // `ctx.body` — reading `request.formData()` first would consume an
+        // already-consumed stream. `pets/:id/upload-image` has always read the
+        // parsed body; this route did not, and matched no other upload here.
+        // The formData path stays as a fallback for a raw, unparsed body.
+        let file = (body?.image ?? body?.file) as File | null;
+        if (!file && typeof request?.formData === 'function') {
+          try {
+            const formData = await request.formData();
+            file = formData.get('image') as File | null;
+          } catch {
+            // Body already consumed by the parser and no file on it — fall
+            // through to the "image file is required" answer below.
+          }
+        }
+
+        if (!file || typeof file.arrayBuffer !== 'function') {
+          return fail(400, 'image file is required');
         }
 
         const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
         if (!allowedTypes.includes(file.type)) {
-          return { success: false, error: 'Invalid file type. Use JPG, PNG, or WebP', data: null };
+          return fail(415, `Invalid file type: ${file.type || 'unknown'}. Use JPG, PNG, or WebP`);
         }
         if (file.size > 10 * 1024 * 1024) {
-          return { success: false, error: 'File too large. Max 10MB', data: null };
+          return fail(413, 'File too large. Max 10MB');
         }
 
         const arrayBuffer = await file.arrayBuffer();
@@ -31,10 +52,9 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
         return { success: true, data: result, error: null };
       } catch (err: any) {
         console.error('[vision/analyze-pet-image] error:', err?.message ?? err);
-        return new Response(
-          JSON.stringify({ success: false, data: null, error: err?.message ?? 'Vision analysis failed' }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } },
-        );
+        // These used to return HTTP 200 with `success: false`, which the app
+        // read as "no pet in this photo" instead of as a failure.
+        return fail(500, err?.message ?? 'Vision analysis failed');
       }
     })
 
@@ -109,7 +129,91 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
       return { success: true, data: result, error: null };
     })
 
-    // ─── Chat: Send message (REST fallback — WebSocket is primary) ─────
+    /**
+     * Chat: streamed reply (Server-Sent Events).
+     *
+     * The blocking endpoint below only answers once the whole tool loop has
+     * finished, which is 10–20 seconds on a multi-step request. This emits the
+     * text as the model writes it, plus a `tool` event whenever an action
+     * starts so the UI can show what is happening.
+     *
+     * SSE rather than WebSocket: replies are one-directional and short-lived,
+     * so a socket buys nothing here and costs connection state. (The app's old
+     * WebSocket client pointed at a `/ws/chat` route that never existed.)
+     *
+     * Event frames: `{"type":"delta","text":…}`, `{"type":"tool","name":…}`,
+     * `{"type":"done","message":…,"toolsUsed":[…]}`, `{"type":"error",…}`.
+     */
+    .post('/chat/sessions/:sessionId/stream', async (ctx: any) => {
+      const { params, body, headers, jwt } = ctx;
+      const user = await requireAuth(headers, jwt);
+      const { message, petId, image } = body as {
+        message: string;
+        petId?: string;
+        image?: { base64?: string; mimeType?: string };
+      };
+      if (!message?.trim()) throw new ValidationError('message is required');
+
+      // A photo can ride along with the message, so "does this look infected?"
+      // stays one conversation instead of a detour through the vision endpoint.
+      let chatImage: { base64: string; mimeType: string } | undefined;
+      if (image?.base64) {
+        const mimeType = String(image.mimeType ?? 'image/jpeg');
+        if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+          throw new ValidationError('image must be JPEG, PNG or WebP');
+        }
+        // ~7MB of base64 is ~5MB of image; past that providers reject it
+        // anyway and the request just wastes a round trip.
+        if (image.base64.length > 7_000_000) throw new ValidationError('image is too large (max ~5MB)');
+        chatImage = { base64: image.base64, mimeType };
+      }
+
+      const authToken = headers.authorization?.startsWith('Bearer ')
+        ? headers.authorization.slice(7)
+        : undefined;
+
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (payload: unknown) =>
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+          try {
+            for await (const event of AiService.streamMessage(
+              user.id,
+              params.sessionId,
+              message.trim(),
+              petId,
+              authToken,
+              chatImage,
+            )) {
+              send(
+                event.type === 'done'
+                  ? { type: 'done', message: event.message, toolsUsed: event.toolCalls.map((t) => t.tool) }
+                  : event,
+              );
+            }
+          } catch (e: any) {
+            // The status line is long gone by the time this can fail, so the
+            // error has to travel as a frame the client can act on.
+            send({ type: 'error', message: e?.message ?? 'Chat failed' });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          // Proxies that buffer would defeat the whole point.
+          'X-Accel-Buffering': 'no',
+        },
+      });
+    })
+
+    // ─── Chat: Send message (blocking fallback for older app builds) ───
     .post('/chat/sessions/:sessionId/messages', async (ctx: any) => {
       const { params, body, headers, jwt } = ctx;
       const user = await requireAuth(headers, jwt);
@@ -160,8 +264,15 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
       return { success: true, data: result, error: null };
     })
 
-    // ─── Legacy ────────────────────────────────────────────────────────
-    .post('/detect-breed', async () => ({ success: true, data: null, error: null }))
+    /*
+     * `POST /detect-breed` was removed. It answered every request with
+     * `data: null` and no screen ever called it — the app's matching
+     * `detectBreed()` helper was dead too. Breed detection is
+     * `POST /vision/analyze-pet-image` above, which takes the image itself
+     * rather than a URL; a URL-taking variant would mean fetching arbitrary
+     * user-supplied addresses from the server, which is not worth an SSRF
+     * surface for a feature nothing used.
+     */
 
     // ─── Symptom check ─────────────────────────────────────────────────
     .post('/symptom-check', async (ctx: any) => {

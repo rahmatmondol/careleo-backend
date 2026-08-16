@@ -1,7 +1,7 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { NotFoundError } from '@/shared/errors';
 import { PetsModel } from '@/modules/pets/model';
 import { getModelForPurpose, recordTokenUsage } from '@/modules/ai/model-registry';
+import { generateText } from '@/modules/ai/generate';
 import { PetProfileModel, type PetProfileRow } from './model';
 
 const VALID_CATEGORIES = ['diet', 'health', 'activity', 'behavior', 'preference', 'other'];
@@ -217,9 +217,12 @@ export const PetProfileService = {
   }): Promise<void> => {
     const { userId, petId, sessionId, userText, assistantText } = params;
     try {
-      // Only the Google path is used here (default/fallback provider).
       const resolved = await getModelForPurpose('general_chat');
-      if (resolved.provider !== 'google' || !resolved.apiKey) return;
+      // This used to require the Google provider. Because it runs
+      // fire-and-forget, switching the model to any other provider stopped the
+      // AI learning anything about the pet — with no error, no log, and a chat
+      // that looked entirely healthy while its memory quietly froze.
+      if (!resolved.apiKey) return;
 
       const existing = await PetProfileModel.listFacts(petId, { activeOnly: true, limit: 25 });
       const existingList = existing.map((f) => `- ${f.fact}`).join('\n') || '(none)';
@@ -238,11 +241,7 @@ Extract ONLY new, durable facts about the pet (diet, health, allergies, activity
 Return ONLY a JSON array, no markdown:
 [{"category":"diet|health|activity|behavior|preference|other","fact":"concise statement"}]`;
 
-      const genAI = new GoogleGenerativeAI(resolved.apiKey);
-      const model = genAI.getGenerativeModel({ model: resolved.modelName });
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      const usage = result.response.usageMetadata;
+      const { text, inputTokens, outputTokens } = await generateText(resolved, prompt, 1024);
 
       await recordTokenUsage({
         userId,
@@ -250,8 +249,8 @@ Return ONLY a JSON array, no markdown:
         sessionId,
         model: resolved,
         feature: 'fact_extraction',
-        inputTokens: usage?.promptTokenCount ?? 200,
-        outputTokens: usage?.candidatesTokenCount ?? 100,
+        inputTokens,
+        outputTokens,
       });
 
       const facts = parseJson(text);

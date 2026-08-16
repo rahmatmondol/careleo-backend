@@ -10,6 +10,12 @@ import { runAiNudgeJob } from './ai-nudge.job';
 import { runDailyCheckinJob } from './daily-checkin.job';
 import { runLowStockJob } from './low-stock.job';
 import { runVaccineDueJob } from './vaccine-due.job';
+import { runSymptomFollowupJob } from './symptom-followup.job';
+import { runWeeklyReportJob } from './weekly-report.job';
+import { runPhotoCheckinJob } from './photo-checkin.job';
+import { runWeatherAdvisoryJob } from './weather-advisory.job';
+import { runMilestonesJob } from './milestones.job';
+import { runVetPrepJob } from './vet-prep.job';
 import { startSubscriptionRunner } from '@/modules/shop/jobs/subscription-runner';
 
 const TASK_CHECKER_INTERVAL_MS = 30 * 60 * 1000;  // 30 minutes
@@ -19,6 +25,20 @@ const LOW_STOCK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const VACCINE_DUE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const TASK_RECURRENCE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
+/**
+ * The care-intelligence jobs.
+ *
+ * All of them tick hourly and gate themselves on the user's own clock (and
+ * their own send-once caps), rather than each owning a bespoke cadence here.
+ * The exception is milestones, which move on the scale of weeks.
+ */
+const SYMPTOM_FOLLOWUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const WEEKLY_REPORT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const PHOTO_CHECKIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const WEATHER_ADVISORY_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const VET_PREP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const MILESTONES_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 let taskCheckerTimer: ReturnType<typeof setInterval> | null = null;
 let aiNudgeTimer: ReturnType<typeof setInterval> | null = null;
 let dailyCheckinTimer: ReturnType<typeof setInterval> | null = null;
@@ -26,6 +46,12 @@ let lowStockTimer: ReturnType<typeof setInterval> | null = null;
 let vaccineDueTimer: ReturnType<typeof setInterval> | null = null;
 let taskRecurrenceTimer: ReturnType<typeof setInterval> | null = null;
 let subscriptionTimer: ReturnType<typeof setInterval> | null = null;
+let symptomFollowupTimer: ReturnType<typeof setInterval> | null = null;
+let weeklyReportTimer: ReturnType<typeof setInterval> | null = null;
+let photoCheckinTimer: ReturnType<typeof setInterval> | null = null;
+let weatherAdvisoryTimer: ReturnType<typeof setInterval> | null = null;
+let vetPrepTimer: ReturnType<typeof setInterval> | null = null;
+let milestonesTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startJobs() {
   console.log('[Jobs] Starting background jobs...');
@@ -38,8 +64,8 @@ export function startJobs() {
   taskCheckerTimer = setInterval(async () => {
     try {
       const result = await runTaskCheckerJob();
-      if (result.notified > 0) {
-        console.log(`[Jobs] task-checker: notified ${result.notified} of ${result.checked} overdue tasks`);
+      if (result.handedOff > 0) {
+        console.log(`[Jobs] task-checker: handed ${result.handedOff} of ${result.checked} overdue tasks to the AI`);
       }
     } catch (err) {
       console.error('[Jobs] task-checker error:', err);
@@ -112,6 +138,67 @@ export function startJobs() {
     }
   }, TASK_RECURRENCE_INTERVAL_MS);
 
+  // ── Care intelligence ───────────────────────────────────────────────────
+  // None of these run on startup: a redeploy must never produce a burst of
+  // proactive messages. They wait for their first tick like everything else
+  // that talks to a user unprompted.
+
+  symptomFollowupTimer = setInterval(async () => {
+    try {
+      const result = await runSymptomFollowupJob();
+      if (result.followedUp > 0) {
+        console.log(`[Jobs] symptom-followup: ${result.followedUp} follow-ups`);
+      }
+    } catch (err) {
+      console.error('[Jobs] symptom-followup error:', err);
+    }
+  }, SYMPTOM_FOLLOWUP_INTERVAL_MS);
+
+  weeklyReportTimer = setInterval(async () => {
+    try {
+      const result = await runWeeklyReportJob();
+      if (result.sent > 0) console.log(`[Jobs] weekly-report: ${result.sent} reports`);
+    } catch (err) {
+      console.error('[Jobs] weekly-report error:', err);
+    }
+  }, WEEKLY_REPORT_INTERVAL_MS);
+
+  photoCheckinTimer = setInterval(async () => {
+    try {
+      const result = await runPhotoCheckinJob();
+      if (result.asked > 0) console.log(`[Jobs] photo-checkin: ${result.asked} asked`);
+    } catch (err) {
+      console.error('[Jobs] photo-checkin error:', err);
+    }
+  }, PHOTO_CHECKIN_INTERVAL_MS);
+
+  weatherAdvisoryTimer = setInterval(async () => {
+    try {
+      const result = await runWeatherAdvisoryJob();
+      if (result.advised > 0) console.log(`[Jobs] weather-advisory: ${result.advised} advisories`);
+    } catch (err) {
+      console.error('[Jobs] weather-advisory error:', err);
+    }
+  }, WEATHER_ADVISORY_INTERVAL_MS);
+
+  vetPrepTimer = setInterval(async () => {
+    try {
+      const result = await runVetPrepJob();
+      if (result.prepared > 0) console.log(`[Jobs] vet-prep: ${result.prepared} prep notes`);
+    } catch (err) {
+      console.error('[Jobs] vet-prep error:', err);
+    }
+  }, VET_PREP_INTERVAL_MS);
+
+  milestonesTimer = setInterval(async () => {
+    try {
+      const result = await runMilestonesJob();
+      if (result.created > 0) console.log(`[Jobs] milestones: ${result.created} created`);
+    } catch (err) {
+      console.error('[Jobs] milestones error:', err);
+    }
+  }, MILESTONES_INTERVAL_MS);
+
   /**
    * "Subscribe & save" recurring orders.
    *
@@ -134,6 +221,12 @@ export function stopJobs() {
   if (vaccineDueTimer) clearInterval(vaccineDueTimer);
   if (taskRecurrenceTimer) clearInterval(taskRecurrenceTimer);
   if (subscriptionTimer) clearInterval(subscriptionTimer);
+  if (symptomFollowupTimer) clearInterval(symptomFollowupTimer);
+  if (weeklyReportTimer) clearInterval(weeklyReportTimer);
+  if (photoCheckinTimer) clearInterval(photoCheckinTimer);
+  if (weatherAdvisoryTimer) clearInterval(weatherAdvisoryTimer);
+  if (vetPrepTimer) clearInterval(vetPrepTimer);
+  if (milestonesTimer) clearInterval(milestonesTimer);
   console.log('[Jobs] Background jobs stopped.');
 }
 

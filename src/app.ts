@@ -27,6 +27,8 @@ import { adminSubscriptionsController, subscriptionsController } from './modules
 import { petProfileController } from './modules/pet-profile/index';
 import { foodInventoryController } from './modules/food-inventory/index';
 import { vaccinationsController } from './modules/vaccinations/index';
+import { caregiversController } from './modules/caregivers/index';
+import { careController } from './modules/care/index';
 
 // ─── Domains merged in from the former standalone services ────────────────
 // Each of these used to be its own Bun process behind the api-gateway. They
@@ -136,6 +138,8 @@ export const app = new Elysia()
       .use(petProfileController)
       .use(foodInventoryController)
       .use(vaccinationsController)
+      .use(caregiversController)
+      .use(careController)
 
       // ─── Merged domains ────────────────────────────────────────────────
       // `domainAuth` derives an *optional* `user` for these modules and must be

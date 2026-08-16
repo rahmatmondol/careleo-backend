@@ -1,11 +1,9 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
 import { AiModel } from './model';
 import { TasksService } from '../tasks/service';
 import { RemindersService } from '../reminders/service';
 import { PetProfileModel } from '@/modules/pet-profile/model';
 import { getModelForPurpose, recordTokenUsage } from './model-registry';
+import { generateText } from './generate';
 
 // ─── Care plan types ──────────────────────────────────────────────────────
 
@@ -151,41 +149,9 @@ export const CarePlanService = {
     const resolved = await getModelForPurpose('care_plan');
     const prompt = buildCarePlanPrompt(pet, prefs, profile, facts);
 
-    let text = '';
-    let inputTokens = 800;
-    let outputTokens = 600;
-
-    if (resolved.provider === 'openai' || resolved.provider === 'deepseek' || resolved.provider === 'openai_custom') {
-      const client = new OpenAI({ apiKey: resolved.apiKey, baseURL: resolved.baseUrl ?? undefined });
-      const res = await client.chat.completions.create({
-        model: resolved.modelName,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 2048,
-      });
-      text = res.choices[0]?.message?.content ?? '';
-      inputTokens = res.usage?.prompt_tokens ?? 800;
-      outputTokens = res.usage?.completion_tokens ?? 600;
-
-    } else if (resolved.provider === 'anthropic' || resolved.provider === 'anthropic_custom') {
-      const client = new Anthropic({ apiKey: resolved.apiKey, ...(resolved.baseUrl && { baseURL: resolved.baseUrl }) });
-      const res = await client.messages.create({
-        model: resolved.modelName,
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }],
-      });
-      text = (res.content[0] as any).text ?? '';
-      inputTokens = res.usage?.input_tokens ?? 800;
-      outputTokens = res.usage?.output_tokens ?? 600;
-
-    } else {
-      // Google Gemini (default)
-      const genAI = new GoogleGenerativeAI(resolved.apiKey);
-      const model = genAI.getGenerativeModel({ model: resolved.modelName });
-      const result = await model.generateContent(prompt);
-      text = result.response.text();
-      inputTokens = result.response.usageMetadata?.promptTokenCount ?? 800;
-      outputTokens = result.response.usageMetadata?.candidatesTokenCount ?? 600;
-    }
+    // Was a hand-rolled copy of the same three-provider switch, with usage
+    // defaulting to invented 800/600 counts when a provider reported none.
+    const { text, inputTokens, outputTokens } = await generateText(resolved, prompt, 2048);
 
     await recordTokenUsage({ userId, petId, model: resolved, feature: 'care_plan', inputTokens, outputTokens });
 

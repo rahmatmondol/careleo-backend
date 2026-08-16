@@ -6,11 +6,14 @@ import {
   pets,
   productSubscriptions,
   products,
+  roles,
   subscriptionPlans,
   tasks,
+  userRoles,
   users,
   userSubscriptions,
 } from '@/shared/db/schema';
+import { ROLE_PERMISSIONS, type Role } from '@/shared/auth/rbac';
 
 /**
  * Orders that never became money. Excluded everywhere revenue is summed, so
@@ -453,6 +456,70 @@ export const AdminModel = {
     };
   },
 
+  /** One subscription with its customer and plan, for the detail page. */
+  async getSubscription(id: string) {
+    const rows = await db
+      .select({
+        id: userSubscriptions.id,
+        userId: userSubscriptions.userId,
+        status: userSubscriptions.status,
+        currentPeriodStart: userSubscriptions.currentPeriodStart,
+        currentPeriodEnd: userSubscriptions.currentPeriodEnd,
+        cancelAtPeriodEnd: userSubscriptions.cancelAtPeriodEnd,
+        createdAt: userSubscriptions.createdAt,
+        planId: subscriptionPlans.id,
+        planName: subscriptionPlans.name,
+        planPrice: subscriptionPlans.price,
+        billingCycle: subscriptionPlans.billingCycle,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        avatarUrl: users.avatarUrl,
+      })
+      .from(userSubscriptions)
+      .innerJoin(users, eq(userSubscriptions.userId, users.id))
+      .innerJoin(subscriptionPlans, eq(userSubscriptions.planId, subscriptionPlans.id))
+      .where(eq(userSubscriptions.id, id))
+      .limit(1);
+
+    const row = rows[0];
+    if (!row) return null;
+
+    return {
+      ...row,
+      planPrice: Number(row.planPrice ?? 0),
+      customer: `${row.firstName ?? ''} ${row.lastName ?? ''}`.trim() || row.email,
+      // There is no invoices table — billing is not wired to a payment
+      // processor yet, so the detail page's history is genuinely empty rather
+      // than filled with plausible-looking rows.
+      invoices: [] as unknown[],
+    };
+  },
+
+  /**
+   * Admin edit of one subscription: move plan, change status, or schedule the
+   * cancellation. Only these three fields are writable — periods are set by
+   * billing, not by hand.
+   */
+  async updateSubscription(
+    id: string,
+    patch: { status?: string; cancelAtPeriodEnd?: boolean; planId?: string },
+  ) {
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.status !== undefined) values.status = patch.status;
+    if (patch.cancelAtPeriodEnd !== undefined) values.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
+    if (patch.planId !== undefined) values.planId = patch.planId;
+
+    const updated = await db
+      .update(userSubscriptions)
+      .set(values as any)
+      .where(eq(userSubscriptions.id, id))
+      .returning({ id: userSubscriptions.id });
+
+    if (!updated[0]) return null;
+    return this.getSubscription(id);
+  },
+
   /**
    * Subscription analytics: how many subscribers per plan and the monthly
    * recurring revenue they represent. Yearly plans are divided by 12 so MRR
@@ -481,6 +548,26 @@ export const AdminModel = {
       .from(userSubscriptions)
       .groupBy(userSubscriptions.status);
 
+    const windowStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const [newSignups, churned] = await Promise.all([
+      db
+        .select({ count: sql<number>`COUNT(*)::int` })
+        .from(userSubscriptions)
+        .where(gte(userSubscriptions.createdAt, windowStart)),
+      // Cancelled *recently* — `updatedAt` is when the status last moved, which
+      // is the only cancellation timestamp the table keeps.
+      db
+        .select({ count: sql<number>`COUNT(*)::int` })
+        .from(userSubscriptions)
+        .where(
+          and(
+            inArray(userSubscriptions.status, ['canceled', 'cancelled']),
+            gte(userSubscriptions.updatedAt, windowStart),
+          ),
+        ),
+    ]);
+
     const plans = byPlan.map((p) => {
       const price = Number(p.price ?? 0);
       const monthly = String(p.billingCycle).toLowerCase().startsWith('year') ? price / 12 : price;
@@ -495,14 +582,176 @@ export const AdminModel = {
       };
     });
 
+    const subscribers = plans.reduce((s, p) => s + p.subscribers, 0);
+    const activeSubscribers = plans.reduce((s, p) => s + p.activeSubscribers, 0);
+    const mrr = Math.round(plans.reduce((s, p) => s + p.mrr, 0) * 100) / 100;
+    const churnedInPeriod = churned[0]?.count ?? 0;
+    const churnBase = activeSubscribers + churnedInPeriod;
+
     return {
       plans,
       byStatus,
-      totals: {
-        subscribers: plans.reduce((s, p) => s + p.subscribers, 0),
-        activeSubscribers: plans.reduce((s, p) => s + p.activeSubscribers, 0),
-        mrr: Math.round(plans.reduce((s, p) => s + p.mrr, 0) * 100) / 100,
-      },
+      // Headline numbers the subscriptions dashboard renders directly.
+      mrr,
+      arr: Math.round(mrr * 12 * 100) / 100,
+      activeSubscribers,
+      newSignupsThisMonth: newSignups[0]?.count ?? 0,
+      /** Share of the 30-day subscriber base that cancelled in those 30 days. */
+      churnRate: churnBase ? Math.round((churnedInPeriod / churnBase) * 1000) / 10 : 0,
+      totals: { subscribers, activeSubscribers, mrr },
     };
+  },
+
+  // ─── Admin staff & roles ───────────────────────────────────────────────
+  //
+  // Role *membership* is a database fact (`user_roles` → `roles`), but the
+  // permissions a role carries are not: `requirePermission` reads the static
+  // ROLE_PERMISSIONS map in shared/auth/rbac.ts, and the `role_permissions`
+  // table is not consulted by anything. So permissions are reported from the
+  // code that enforces them, and are read-only.
+
+  /** Role codes that can sign in to the admin panel. */
+  ADMIN_ROLE_CODES: ['super_admin', 'admin', 'support'] as const,
+
+  /** Everyone holding an admin-panel role, with the role they hold. */
+  async listAdmins() {
+    const rows = await db
+      .select({
+        id: users.id,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        email: users.email,
+        avatarUrl: users.avatarUrl,
+        status: users.status,
+        lastLoginAt: users.lastLoginAt,
+        createdAt: users.createdAt,
+        roleId: roles.id,
+        roleCode: roles.code,
+        roleName: roles.name,
+      })
+      .from(users)
+      .innerJoin(userRoles, eq(userRoles.userId, users.id))
+      .innerJoin(roles, eq(userRoles.roleId, roles.id))
+      .where(inArray(roles.code, [...this.ADMIN_ROLE_CODES]))
+      .orderBy(desc(users.createdAt));
+
+    return rows.map((r) => ({ ...r, name: `${r.firstName} ${r.lastName}`.trim() }));
+  },
+
+  /** Roles from the database, with their enforced permissions and headcount. */
+  async listRoles() {
+    const rows = await db
+      .select({
+        id: roles.id,
+        code: roles.code,
+        name: roles.name,
+        description: roles.description,
+        isSystem: roles.isSystem,
+        userCount: sql<number>`(SELECT COUNT(*)::int FROM ${userRoles} WHERE ${userRoles.roleId} = ${roles.id})`,
+      })
+      .from(roles)
+      .orderBy(roles.code);
+
+    return {
+      roles: rows.map((r) => ({
+        ...r,
+        permissions: ROLE_PERMISSIONS[r.code as Role] ?? [],
+      })),
+      permissions: Array.from(new Set(Object.values(ROLE_PERMISSIONS).flat())).sort(),
+      /** Permissions come from code, so the panel must not offer to edit them. */
+      permissionsEditable: false,
+    };
+  },
+
+  /** Create an admin-panel account and assign it a role in one transaction. */
+  async createAdmin(input: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    password: string;
+    roleId: string;
+    status?: string;
+  }) {
+    const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
+    if (existing[0]) return { error: 'A user with that email already exists' as const };
+
+    const role = await db.select({ id: roles.id }).from(roles).where(eq(roles.id, input.roleId)).limit(1);
+    if (!role[0]) return { error: 'Unknown role' as const };
+
+    const passwordHash = await Bun.password.hash(input.password);
+    const inserted = await db
+      .insert(users)
+      .values({
+        firstName: input.firstName,
+        lastName: input.lastName,
+        email: input.email,
+        passwordHash,
+        status: input.status ?? 'active',
+        isEmailVerified: true,
+      })
+      .returning({ id: users.id });
+
+    const userId = inserted[0]!.id;
+    await db.insert(userRoles).values({ userId, roleId: input.roleId });
+    return { id: userId };
+  },
+
+  /** Rename, re-role, or suspend an existing admin. */
+  async updateAdmin(
+    id: string,
+    patch: { firstName?: string; lastName?: string; email?: string; status?: string; roleId?: string },
+  ) {
+    const values: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.firstName !== undefined) values.firstName = patch.firstName;
+    if (patch.lastName !== undefined) values.lastName = patch.lastName;
+    if (patch.email !== undefined) values.email = patch.email;
+    if (patch.status !== undefined) values.status = patch.status;
+
+    const updated = await db
+      .update(users)
+      .set(values as any)
+      .where(eq(users.id, id))
+      .returning({ id: users.id });
+    if (!updated[0]) return null;
+
+    if (patch.roleId) {
+      // One admin-panel role per account: drop the old assignment first so a
+      // demoted super_admin does not keep their old permissions.
+      await db
+        .delete(userRoles)
+        .where(
+          and(
+            eq(userRoles.userId, id),
+            inArray(
+              userRoles.roleId,
+              db.select({ id: roles.id }).from(roles).where(inArray(roles.code, [...this.ADMIN_ROLE_CODES])),
+            ),
+          ),
+        );
+      await db.insert(userRoles).values({ userId: id, roleId: patch.roleId }).onConflictDoNothing();
+    }
+
+    return { id };
+  },
+
+  /**
+   * Revoke admin access. The user row is kept — it may own pets, orders and
+   * audit history — so this strips the admin role and deactivates the login
+   * instead of deleting a record other tables point at.
+   */
+  async revokeAdmin(id: string) {
+    const adminRoleIds = db
+      .select({ id: roles.id })
+      .from(roles)
+      .where(inArray(roles.code, [...this.ADMIN_ROLE_CODES]));
+
+    await db.delete(userRoles).where(and(eq(userRoles.userId, id), inArray(userRoles.roleId, adminRoleIds)));
+    const updated = await db
+      .update(users)
+      .set({ status: 'inactive', updatedAt: new Date() })
+      .where(eq(users.id, id))
+      .returning({ id: users.id });
+
+    return updated[0] ?? null;
   },
 };

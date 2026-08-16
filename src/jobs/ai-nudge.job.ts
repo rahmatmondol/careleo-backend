@@ -1,28 +1,34 @@
 /**
  * AI Nudge Job — runs every 2 hours.
- * Finds tasks where push was sent 2+ hrs ago but still incomplete.
- * Sends an in-app AI chat message as a proactive follow-up.
+ *
+ * Picks up the tasks `task-checker` handed off (open long after the push ladder
+ * finished) and continues them in chat instead of on the lock screen: one
+ * message, once, per task. The user can reply — "he wouldn't eat", "I did it
+ * already" — which is a conversation a push notification can never have.
+ *
+ * The accompanying push is a single AI-category notification that respects the
+ * user's quiet hours; without it the chat message sat unseen until the next
+ * time they happened to open the app.
  */
 
-import { and, eq, isNull, lt } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { tasks } from '@/shared/db/schema';
-import { aiChatSessions, aiChatMessages, aiProactiveMessages } from '@/shared/db/schema/ai.schema';
+import { pets, tasks } from '@/shared/db/schema';
+import { aiProactiveMessages } from '@/shared/db/schema/ai.schema';
+import { AiService } from '@/modules/ai/service';
+import { sendProactive } from './shared/proactive';
 
-const NUDGE_DELAY_HOURS = 2;
+const MAX_PER_RUN = 50;
 
 export async function runAiNudgeJob() {
   const now = new Date();
-  const nudgeThreshold = new Date(now.getTime() - NUDGE_DELAY_HOURS * 60 * 60 * 1000);
 
-  // Find proactive logs where push was sent but no chat sent yet, no action taken
   const pendingNudges = await db
     .select({
       id: aiProactiveMessages.id,
       userId: aiProactiveMessages.userId,
       petId: aiProactiveMessages.petId,
       taskId: aiProactiveMessages.taskId,
-      pushSentAt: aiProactiveMessages.pushSentAt,
     })
     .from(aiProactiveMessages)
     .where(
@@ -30,10 +36,9 @@ export async function runAiNudgeJob() {
         eq(aiProactiveMessages.messageType, 'task_overdue'),
         isNull(aiProactiveMessages.chatSentAt),
         isNull(aiProactiveMessages.actionTakenAt),
-        lt(aiProactiveMessages.pushSentAt, nudgeThreshold),
       ),
     )
-    .limit(50);
+    .limit(MAX_PER_RUN);
 
   if (pendingNudges.length === 0) return { nudged: 0 };
 
@@ -41,16 +46,21 @@ export async function runAiNudgeJob() {
   for (const nudge of pendingNudges) {
     if (!nudge.taskId) continue;
 
-    // Check task is still incomplete
-    const taskRows = await db
-      .select({ id: tasks.id, title: tasks.title, isCompleted: tasks.isCompleted })
+    const [task] = await db
+      .select({
+        id: tasks.id,
+        title: tasks.title,
+        petId: tasks.petId,
+        isCompleted: tasks.isCompleted,
+        skippedAt: tasks.skippedAt,
+      })
       .from(tasks)
       .where(eq(tasks.id, nudge.taskId))
       .limit(1);
 
-    const task = taskRows[0];
-    if (!task || task.isCompleted) {
-      // Task was completed — mark proactive as action taken
+    if (!task || task.isCompleted || task.skippedAt) {
+      // Done, skipped on purpose, or deleted in the meantime — close the loop
+      // and say nothing.
       await db
         .update(aiProactiveMessages)
         .set({ actionTakenAt: now })
@@ -58,31 +68,33 @@ export async function runAiNudgeJob() {
       continue;
     }
 
-    // Find or create a chat session for this user
-    let session = await getOrCreateNudgeSession(nudge.userId);
+    const petName = await getPetName(task.petId ?? nudge.petId);
+    const petId = task.petId ?? nudge.petId;
 
-    // Build a human-like proactive message
-    const message = buildNudgeMessage(task.title);
-
-    // Save the proactive AI message to the session
-    await db.insert(aiChatMessages).values({
-      sessionId: session.id,
-      role: 'assistant',
-      content: message,
-      isProactive: true,
+    // AI-written, so it can draw on what it knows — the diet, the condition,
+    // the fact that this owner works nights — instead of a rotating template.
+    const message = await AiService.generateProactiveMessage({
+      userId: nudge.userId,
+      petId: petId ?? undefined,
+      feature: 'task_nudge',
+      fallback: buildNudgeMessage(task.title, petName),
+      task: `The owner has not completed the task "${task.title}" long after it was due, and the reminder notifications have already stopped. Write ONE message that asks — without scolding — whether it got done or whether something got in the way, and offer to reschedule it. If the task matters medically for this pet, say why in a clause.`,
     });
 
-    // Update the session's updatedAt so it surfaces at top
-    await db
-      .update(aiChatSessions)
-      .set({ updatedAt: now })
-      .where(eq(aiChatSessions.id, session.id));
-
-    // Mark chat sent
     await db
       .update(aiProactiveMessages)
-      .set({ chatSentAt: now })
+      .set({ chatSentAt: now, pushSentAt: now })
       .where(eq(aiProactiveMessages.id, nudge.id));
+
+    await sendProactive({
+      userId: nudge.userId,
+      petId,
+      messageType: 'task_nudge',
+      message,
+      type: 'AI_ASSISTANT',
+      priority: 'low',
+      data: { event: 'ai_nudge', taskId: task.id },
+    });
 
     nudged++;
   }
@@ -90,31 +102,18 @@ export async function runAiNudgeJob() {
   return { nudged };
 }
 
-async function getOrCreateNudgeSession(userId: string) {
-  // Look for existing AI session for this user
-  const existing = await db
-    .select({ id: aiChatSessions.id })
-    .from(aiChatSessions)
-    .where(and(eq(aiChatSessions.userId, userId), eq(aiChatSessions.isAdminSession, false)))
-    .orderBy(aiChatSessions.updatedAt)
-    .limit(1);
-
-  if (existing[0]) return existing[0];
-
-  // Create a new session
-  const rows = await db
-    .insert(aiChatSessions)
-    .values({ userId, title: 'Careleo AI', isAdminSession: false })
-    .returning({ id: aiChatSessions.id });
-
-  return rows[0]!;
+async function getPetName(petId: string | null): Promise<string | null> {
+  if (!petId) return null;
+  const [row] = await db.select({ name: pets.name }).from(pets).where(eq(pets.id, petId)).limit(1);
+  return row?.name ?? null;
 }
 
-function buildNudgeMessage(taskTitle: string): string {
+function buildNudgeMessage(taskTitle: string, petName: string | null): string {
+  const who = petName ? `${petName}-এর ` : '';
   const templates = [
-    `Hey! আমি দেখলাম "${taskTitle}" task টা এখনো complete হয়নি। তুমি কি এটা করেছ? Complete করলে mark করে দাও।`,
-    `"${taskTitle}" এখনো pending আছে। সব ঠিকঠাক আছে তো? কোনো সাহায্য লাগলে জানাও।`,
-    `Reminder: "${taskTitle}" task টা incomplete আছে। এটা complete হয়ে গেলে আমাকে জানাও।`,
+    `${who}"${taskTitle}" task টা এখনো complete হয়নি দেখলাম। সব ঠিক আছে তো? করা হয়ে গেলে আমাকে বললেই mark করে দেব।`,
+    `${who}"${taskTitle}" এখনো pending। কোনো সমস্যা হচ্ছে, নাকি সময় পাওনি? চাইলে আমি সময়টা বদলে দিতে পারি।`,
+    `${who}"${taskTitle}" নিয়ে একটু জানতে চাচ্ছিলাম — হয়েছে কি? না হলে কবে করবে বলো, আমি সেই মতো reminder সাজিয়ে দিই।`,
   ];
   return templates[Math.floor(Math.random() * templates.length)]!;
 }

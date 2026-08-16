@@ -62,7 +62,17 @@ function buildFallback(purpose: AiPurpose): ResolvedModel {
   return {
     id: 'fallback',
     provider: 'google',
-    modelName: isVision ? 'gemini-1.5-flash' : 'gemini-2.0-flash',
+    /**
+     * A moving alias, not a pinned version.
+     *
+     * This fallback has now rotted twice: gemini-1.5-flash was retired, then
+     * gemini-2.0-flash, each time turning every photo analysis into a 404 from
+     * Google while chat kept working — so nothing looked broken until someone
+     * uploaded a pet photo. `gemini-flash-latest` tracks whatever the current
+     * flash model is, which is what a *fallback* should do. Pin a specific
+     * version in `ai_model_configs` when a particular one is wanted.
+     */
+    modelName: 'gemini-flash-latest',
     apiKey,
     purpose,
     costPer1kInput: isVision ? 0.000075 : 0.00125,

@@ -1,16 +1,35 @@
 import { ValidationError } from '@/shared/errors';
-import { sendPushToTokens } from '@/shared/integrations/firebase';
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
-import { db } from '@/shared/db';
-import { NotificationsModel } from './model';
-import { pets, reminders, tasks } from '@/shared/db/schema';
+import { PUSH_CHANNELS, sendPushToTokens, type PushChannel } from '@/shared/integrations/firebase';
+import { AdminNotificationsModel, NotificationsModel } from './model';
+import { categoryForType, type NotificationPriority } from './preferences';
 
-type PushPayload = {
+export type PushPayload = {
   title: string;
   body: string;
   data?: Record<string, string>;
   type?: string;
+  /** Drives the Android channel and the APNs interruption level. */
+  priority?: NotificationPriority;
 };
+
+/** Which channel a payload should land on. */
+const channelFor = (payload: PushPayload): PushChannel => {
+  if (payload.priority === 'critical') return PUSH_CHANNELS.critical;
+  if (payload.priority === 'low') return PUSH_CHANNELS.quiet;
+  return categoryForType(payload.type) === 'task' ? PUSH_CHANNELS.tasks : PUSH_CHANNELS.default;
+};
+
+/**
+ * Action set for the notification, matching the categories the app registers.
+ *
+ * Only a notification about exactly one task can offer "Done" / "Snooze" —
+ * `taskId` is present precisely in that case, and a bundle deliberately omits
+ * it because neither button would have an unambiguous target.
+ */
+export const TASK_ACTION_CATEGORY = 'careleo-task';
+
+const categoryIdFor = (payload: PushPayload): string | undefined =>
+  payload.data?.taskId && categoryForType(payload.type) === 'task' ? TASK_ACTION_CATEGORY : undefined;
 
 const normalizeData = (data: unknown): Record<string, string> => {
   if (!data || typeof data !== 'object') return {};
@@ -21,100 +40,6 @@ const chunk = <T>(items: T[], size = 500): T[][] => {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
-};
-
-const getSchedulerState = () => {
-  const g = globalThis as any;
-  if (!g.__careleoScheduler) g.__careleoScheduler = { started: false, intervalId: null as any };
-  return g.__careleoScheduler as { started: boolean; intervalId: any };
-};
-
-const parseTimeToMinutes = (input: string): number | null => {
-  const raw = input.trim();
-  if (!raw) return null;
-
-  const match12h = raw.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-  if (match12h) {
-    let h = Number(match12h[1]);
-    const m = Number(match12h[2]);
-    const meridian = match12h[3].toUpperCase();
-    if (Number.isNaN(h) || Number.isNaN(m) || m < 0 || m > 59 || h < 1 || h > 12) return null;
-    if (meridian === 'PM' && h !== 12) h += 12;
-    if (meridian === 'AM' && h === 12) h = 0;
-    return h * 60 + m;
-  }
-
-  const match24h = raw.match(/^(\d{1,2}):(\d{2})$/);
-  if (match24h) {
-    const h = Number(match24h[1]);
-    const m = Number(match24h[2]);
-    if (Number.isNaN(h) || Number.isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
-    return h * 60 + m;
-  }
-
-  return null;
-};
-
-const parseDateOnly = (input: string): Date | null => {
-  const raw = input.trim();
-  if (!raw) return null;
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]) - 1;
-  const d = Number(m[3]);
-  const date = new Date(y, mo, d);
-  if (Number.isNaN(date.getTime())) return null;
-  if (date.getFullYear() !== y || date.getMonth() !== mo || date.getDate() !== d) return null;
-  return date;
-};
-
-const getFrequency = (value: unknown): string => String(value ?? '').trim().toLowerCase();
-
-const sameLocalDate = (a: Date, b: Date) => {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-};
-
-const shouldFireReminderNow = (payload: { frequency?: string | null; reminderDate?: string | null; reminderTime?: string | null }, now: Date): boolean => {
-  const time = parseTimeToMinutes(String(payload.reminderTime ?? '').trim());
-  if (time === null) return false;
-
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const diff = (nowMinutes - time + 1440) % 1440;
-  if (diff !== 0 && diff !== 1) return false;
-
-  const freq = getFrequency(payload.frequency);
-  const dateOnly = payload.reminderDate ? parseDateOnly(String(payload.reminderDate)) : null;
-  const nowForRule = diff === 1 ? new Date(now.getTime() - 60_000) : now;
-
-  if (freq.includes('once') || freq.includes('one')) {
-    if (!dateOnly) return true;
-    return sameLocalDate(nowForRule, dateOnly);
-  }
-
-  if (freq.includes('weekly')) {
-    if (!dateOnly) return true;
-    return nowForRule.getDay() === dateOnly.getDay();
-  }
-
-  if (freq.includes('monthly')) {
-    if (!dateOnly) return true;
-    return nowForRule.getDate() === dateOnly.getDate();
-  }
-
-  return true;
-};
-
-const notificationLoggedRecently = async (type: string, key: string, since: Date) => {
-  try {
-    const result = await db.execute(
-      sql`select id from notification_logs where type = ${type} and data_json like ${`%${key}%`} and created_at >= ${since} limit 1`,
-    );
-    const row = (result as any)?.rows?.[0];
-    return Boolean(row?.id);
-  } catch {
-    return false;
-  }
 };
 
 export const NotificationsService = {
@@ -144,31 +69,63 @@ export const NotificationsService = {
     return { removed: true, fcmToken };
   },
 
-  async sendToUsers(userIds: string[], payload: PushPayload, meta: { targetMode: 'single' | 'custom' | 'all'; createdBy?: string }) {
+  /**
+   * Raw sender — no preference checks. Admin sends use this directly; every
+   * system-generated notification should go through `deliverToUser` instead so
+   * quiet hours and category toggles are honoured.
+   *
+   * `recordInApp: false` skips the in-app history row, for the second half of a
+   * deferred delivery whose row was already written when it was deferred.
+   */
+  async sendToUsers(
+    userIds: string[],
+    payload: PushPayload,
+    meta: { targetMode: 'single' | 'custom' | 'all'; createdBy?: string; recordInApp?: boolean },
+  ) {
     if (!payload.title?.trim() || !payload.body?.trim()) throw new ValidationError('title and body are required');
     if (!userIds.length) return { sent: 0, failed: 0, users: 0, message: 'No users to notify' };
 
     const rows = await NotificationsModel.getActiveTokensByUserIds(userIds);
-    const tokens = rows.map((r) => r.fcmToken);
-    if (!tokens.length) return { sent: 0, failed: 0, users: userIds.length, message: 'No active device token found' };
+    if (!rows.length) return { sent: 0, failed: 0, users: userIds.length, message: 'No active device token found' };
+
+    // Android is sent data-only so the app draws the notification itself and
+    // can attach Done / Snooze; iOS keeps the OS-drawn notification and gets
+    // its actions from the APNs category.
+    const androidTokens = rows.filter((r) => r.platform === 'android').map((r) => r.fcmToken);
+    const otherTokens = rows.filter((r) => r.platform !== 'android').map((r) => r.fcmToken);
+
     let successCount = 0;
     let failureCount = 0;
     const invalidTokens: string[] = [];
 
-    for (const part of chunk(tokens, 500)) {
-      const res = await sendPushToTokens(part, { title: payload.title, body: payload.body, data: normalizeData(payload.data) });
-      successCount += res.successCount;
-      failureCount += res.failureCount;
-      const responses = ((res as any)?.responses ?? []) as Array<{ success: boolean; error?: unknown }>;
-      responses.forEach((r, i) => {
-        if (!r?.success) {
-          const code = (r as any)?.error?.code;
-          if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
-            invalidTokens.push(part[i]);
+    const base = {
+      title: payload.title,
+      body: payload.body,
+      data: normalizeData(payload.data),
+      channelId: channelFor(payload),
+      critical: payload.priority === 'critical',
+      categoryId: categoryIdFor(payload),
+    };
+
+    const send = async (tokens: string[], dataOnly: boolean) => {
+      for (const part of chunk(tokens, 500)) {
+        const res = await sendPushToTokens(part, { ...base, dataOnly });
+        successCount += res.successCount;
+        failureCount += res.failureCount;
+        const responses = ((res as any)?.responses ?? []) as Array<{ success: boolean; error?: unknown }>;
+        responses.forEach((r, i) => {
+          if (!r?.success) {
+            const code = (r as any)?.error?.code;
+            if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
+              invalidTokens.push(part[i]);
+            }
           }
-        }
-      });
-    }
+        });
+      }
+    };
+
+    await send(androidTokens, true);
+    await send(otherTokens, false);
 
     if (invalidTokens.length) await NotificationsModel.deactivateTokens(invalidTokens);
 
@@ -187,17 +144,19 @@ export const NotificationsService = {
       });
     } catch {}
 
-    try {
-      for (const uid of userIds) {
-        await NotificationsModel.insertUserNotification({
-          userId: uid,
-          type: payload.type ?? 'SYSTEM',
-          title: payload.title,
-          body: payload.body,
-          dataJson: JSON.stringify(payload.data ?? {}),
-        });
-      }
-    } catch {}
+    if (meta.recordInApp !== false) {
+      try {
+        for (const uid of userIds) {
+          await NotificationsModel.insertUserNotification({
+            userId: uid,
+            type: payload.type ?? 'SYSTEM',
+            title: payload.title,
+            body: payload.body,
+            dataJson: JSON.stringify(payload.data ?? {}),
+          });
+        }
+      } catch {}
+    }
 
     return { sent: successCount, failed: failureCount, users: userIds.length };
   },
@@ -260,88 +219,50 @@ export const NotificationsService = {
     await NotificationsModel.markAllNotificationsRead(userId);
     return { success: true };
   },
-};
 
-export const startTaskReminderPushScheduler = () => {
-  const state = getSchedulerState();
-  if (state.started) return;
-  state.started = true;
+  // ── Admin notification feed ──────────────────────────────────
 
-  const tick = async () => {
-    const now = new Date();
-    const windowStart = new Date(now.getTime() - 5 * 60_000);
-    const windowEnd = new Date(now.getTime() + 2 * 60_000);
+  async adminFeed(adminId: string, limit = 30) {
+    // The whole window is fetched regardless of `limit` so the bell badge is
+    // an honest total — `limit` only trims what is rendered.
+    const [events, readKeys] = await Promise.all([
+      AdminNotificationsModel.listFeedEvents(),
+      AdminNotificationsModel.listReadKeys(adminId),
+    ]);
 
-    try {
-      const dueTasks = await db
-        .select({
-          id: tasks.id,
-          userId: tasks.userId,
-          title: tasks.title,
-          taskType: tasks.taskType,
-          petId: tasks.petId,
-          petName: pets.name,
-          dueDate: tasks.dueDate,
-        })
-        .from(tasks)
-        .innerJoin(pets, eq(tasks.petId, pets.id))
-        .where(and(eq(tasks.isCompleted, false), gte(tasks.dueDate, windowStart), lte(tasks.dueDate, windowEnd)));
+    const notifications = events.slice(0, limit).map((e) => ({
+      id: e.key,
+      type: e.type,
+      title: e.title,
+      body: e.body,
+      href: e.href,
+      severity: e.severity,
+      createdAt: e.createdAt,
+      isRead: readKeys.has(e.key),
+    }));
 
-      for (const t of dueTasks) {
-        const key = `"taskId":"${t.id}"`;
-        const already = await notificationLoggedRecently('TASK_DUE', key, new Date(now.getTime() - 6 * 60 * 60 * 1000));
-        if (already) continue;
-        try {
-          const petName = String(t.petName ?? '');
-          const taskType = String(t.taskType ?? '').toLowerCase();
-          await NotificationsService.sendToUsers(
-            [t.userId],
-            {
-              title: petName ? `Time for ${petName}'s ${taskType}` : `"${String(t.title)}" is due now`,
-              body: `"${String(t.title)}" is due now`,
-              data: { taskId: String(t.id), event: 'task_due' },
-              type: 'TASK_DUE',
-            },
-            { targetMode: 'single' },
-          );
-        } catch {}
-      }
-    } catch {}
+    return {
+      notifications,
+      unreadCount: events.filter((e) => !readKeys.has(e.key)).length,
+    };
+  },
 
-    try {
-      const activeReminders = await db
-        .select({
-          id: reminders.id,
-          userId: reminders.userId,
-          title: reminders.title,
-          frequency: reminders.frequency,
-          reminderDate: reminders.reminderDate,
-          reminderTime: reminders.reminderTime,
-        })
-        .from(reminders)
-        .where(and(eq(reminders.isActive, true), eq(reminders.isCompleted, false)));
+  async markAdminNotificationRead(adminId: string, eventKey: string) {
+    const key = String(eventKey ?? '').trim();
+    if (!key) throw new ValidationError('notification id is required');
+    await AdminNotificationsModel.markRead(adminId, [key]);
+    return { success: true, id: key };
+  },
 
-      for (const r of activeReminders) {
-        if (!shouldFireReminderNow(r, now)) continue;
-        const key = `"reminderId":"${r.id}"`;
-        const already = await notificationLoggedRecently('REMINDER_DUE', key, new Date(now.getTime() - 6 * 60 * 60 * 1000));
-        if (already) continue;
-        try {
-          await NotificationsService.sendToUsers(
-            [r.userId],
-            {
-              title: 'Reminder',
-              body: `${r.title}`,
-              data: { reminderId: String(r.id), event: 'reminder_due' },
-              type: 'REMINDER_DUE',
-            },
-            { targetMode: 'single' },
-          );
-        } catch {}
-      }
-    } catch {}
-  };
-
-  void tick();
-  state.intervalId = setInterval(() => void tick(), 60_000);
+  async markAllAdminNotificationsRead(adminId: string) {
+    // Only the events currently in the feed can be marked read — anything
+    // older has already aged out of the window.
+    const events = await AdminNotificationsModel.listFeedEvents();
+    const marked = await AdminNotificationsModel.markRead(
+      adminId,
+      events.map((e) => e.key),
+    );
+    void AdminNotificationsModel.pruneReadMarkers(adminId).catch(() => {});
+    return { success: true, marked };
+  },
 };

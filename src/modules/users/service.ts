@@ -1,4 +1,5 @@
 import { ValidationError } from '@/shared/errors';
+import { isIanaZone } from '@/shared/types/timezone';
 import { UsersModel } from './model';
 
 export const UsersService = {
@@ -20,6 +21,13 @@ export const UsersService = {
     const state = payload.state !== undefined ? String(payload.state).trim() : undefined;
     const country = payload.country !== undefined ? String(payload.country).trim() : undefined;
     const postalCode = payload.postalCode !== undefined ? String(payload.postalCode).trim() : undefined;
+    // Sent by the app on sign-in so scheduled work lands on the user's clock.
+    // Silently ignored when it isn't a real zone rather than failing a profile
+    // save the user did not think was about timezones.
+    const timezone =
+      payload.timezone !== undefined && isIanaZone(payload.timezone)
+        ? String(payload.timezone).trim()
+        : undefined;
 
     const updated = await UsersModel.updateProfile(userId, {
       ...(firstName !== undefined ? { firstName } : {}),
@@ -31,6 +39,7 @@ export const UsersService = {
       ...(state !== undefined ? { state } : {}),
       ...(country !== undefined ? { country } : {}),
       ...(postalCode !== undefined ? { postalCode } : {}),
+      ...(timezone !== undefined ? { timezone } : {}),
     });
 
     if (!updated) throw new ValidationError('User not found');

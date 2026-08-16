@@ -57,6 +57,14 @@ export const AiModel = {
 
   // ─── Messages ─────────────────────────────────────────────────────────────
 
+  /** Persist a rolling conversation summary and how far it covers. */
+  async updateSessionSummary(sessionId: string, summary: string, summarizedUpTo: number) {
+    await db
+      .update(aiChatSessions)
+      .set({ summary, summarizedUpTo, updatedAt: new Date() })
+      .where(eq(aiChatSessions.id, sessionId));
+  },
+
   async getMessages(sessionId: string) {
     return db
       .select()

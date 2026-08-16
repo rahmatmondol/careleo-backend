@@ -2,6 +2,7 @@ import {
   boolean,
   index,
   inet,
+  numeric,
   pgTable,
   primaryKey,
   text,
@@ -31,6 +32,23 @@ export const users = pgTable(
     postalCode: varchar('postal_code', { length: 40 }),
     passwordHash: text('password_hash').notNull(),
     avatarUrl: text('avatar_url'),
+    /**
+     * IANA zone reported by the user's device (e.g. `Asia/Dhaka`).
+     *
+     * Needed so scheduled work fires at *their* 9am. Without it the daily
+     * check-in job compared a Node-local hour against an hour Postgres had
+     * extracted in the DB session zone — two different clocks, neither the
+     * user's.
+     */
+    timezone: varchar('timezone', { length: 64 }),
+    /**
+     * Coarse home coordinates, set from the app when location is granted.
+     *
+     * Only used for weather-driven care advice (heat, cold, storms); nothing
+     * requires it, and every weather feature is skipped for users without it.
+     */
+    latitude: numeric('latitude', { precision: 9, scale: 6 }),
+    longitude: numeric('longitude', { precision: 9, scale: 6 }),
     provider: varchar('provider', { length: 20 }).notNull().default('password'),
     status: varchar('status', { length: 20 }).notNull().default('active'),
     isEmailVerified: boolean('is_email_verified').notNull().default(false),

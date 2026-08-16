@@ -23,6 +23,7 @@ const productBody = t.Object({
   status: t.Optional(t.String()),
   supplier: t.Optional(t.Union([t.String(), t.Null()])),
   source: t.Optional(t.Union([t.String(), t.Null()])),
+  subscriptionIncluded: t.Optional(t.Boolean()),
   excludeFromSubscription: t.Optional(t.Boolean()),
   tags: t.Optional(t.Any()),
   attributes: t.Optional(t.Any()),

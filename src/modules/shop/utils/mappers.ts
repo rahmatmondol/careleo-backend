@@ -38,6 +38,8 @@ export const mapProductForAdmin = (p: any) => ({
   source: p.source || '',
   sourceId: p.sourceId || null,
   productType: p.productType || 'Simple',
+  subscriptionIncluded: !!p.subscriptionIncluded,
+  /** @deprecated kept so older admin builds keep hydrating their form. */
   excludeFromSubscription: !!p.excludeFromSubscription,
   tags: safeJsonParse<string[]>(p.tags, []),
   attributes: safeJsonParse<{ name: string; values: string[] }[]>(p.attributes, []),
