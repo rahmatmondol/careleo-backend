@@ -3,6 +3,8 @@ import { TasksModel } from './model';
 import { syncTaskSchedule } from '@/shared/queue';
 import { nextOccurrenceAfter, parseRecurrence } from './recurrence';
 import { adaptDueDate } from './adaptive';
+import { getPreferenceContext } from '@/modules/notifications/preferences';
+import { dayKeyInZone } from '@/shared/types/timezone';
 
 const normalizeText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -151,6 +153,16 @@ export const TasksService = {
   async complete(userId: string, id: string, opts: { completedAt?: unknown } = {}) {
     const before = await this.requireActionable(userId, id);
     if (before.isCompleted) return { message: 'Already completed', task: before };
+
+    // Today's tasks may be marked done at any point in the day — feeding early
+    // before going out is ordinary. A later day is not: nothing that happens
+    // today can complete tomorrow's dose, so it is refused rather than queried.
+    // "Today" is the acting user's, since that is whose day it is.
+    const { timezone } = await getPreferenceContext(userId);
+    const dueDay = dayKeyInZone(timezone, new Date(before.dueDate as any));
+    if (dueDay > dayKeyInZone(timezone)) {
+      throw new ValidationError(`This is not due until ${dueDay}. Only today's tasks can be marked done.`);
+    }
 
     const completedAt = resolveCompletedAt(opts.completedAt);
 

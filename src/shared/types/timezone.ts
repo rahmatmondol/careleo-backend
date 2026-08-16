@@ -29,6 +29,26 @@ export const hourInZone = (timeZone: string, at: Date = new Date()): number => {
   }
 };
 
+/**
+ * Calendar date in `timeZone` as `YYYY-MM-DD`.
+ *
+ * For "is this the same day for this user" — comparing UTC instants gets that
+ * wrong on either side of local midnight. The format sorts lexicographically,
+ * so two keys can be compared directly.
+ */
+export const dayKeyInZone = (timeZone: string, at: Date = new Date()): string => {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(at);
+  } catch {
+    return at.toISOString().slice(0, 10);
+  }
+};
+
 /** Minutes since local midnight (0–1439) in `timeZone`. */
 export const minutesInZone = (timeZone: string, at: Date = new Date()): number => {
   try {
