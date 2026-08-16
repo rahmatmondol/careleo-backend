@@ -70,6 +70,7 @@ export const TasksService = {
       frequency: normalizeText(payload.frequency) ?? 'none',
       dueDate,
       notes: normalizeText(payload.notes),
+      alarmOnMiss: payload.alarmOnMiss === true,
     });
 
     if (!row) throw new ValidationError('Failed to create task');
@@ -126,6 +127,12 @@ export const TasksService = {
       updatePayload.dueDate = dueDate;
     }
     if (payload.notes !== undefined) updatePayload.notes = normalizeText(payload.notes);
+    if (payload.alarmOnMiss !== undefined) {
+      updatePayload.alarmOnMiss = payload.alarmOnMiss === true;
+      // Turning the alarm back on is a fresh decision, so the two strikes that
+      // silenced it before should not silence it again immediately.
+      if (payload.alarmOnMiss === true) updatePayload.alarmDismissals = 0;
+    }
     if (payload.isCompleted !== undefined) {
       updatePayload.isCompleted = Boolean(payload.isCompleted);
       updatePayload.completedAt = updatePayload.isCompleted ? resolveCompletedAt(payload.completedAt) : null;
@@ -173,6 +180,8 @@ export const TasksService = {
       // Completing something previously skipped supersedes the skip.
       skippedAt: null,
       skipReason: null,
+      // Resolving it settles the argument — the next occurrence starts clean.
+      alarmDismissals: 0,
     });
     if (!row) throw new NotFoundError('Task not found');
 
@@ -267,6 +276,7 @@ export const TasksService = {
       completedBy: null,
       skippedAt: new Date(),
       skipReason: normalizeText(reason)?.slice(0, 200) ?? null,
+      alarmDismissals: 0,
     });
     if (!row) throw new NotFoundError('Task not found');
 
@@ -403,6 +413,30 @@ export const TasksService = {
     await this.resyncSlots(before.userId, before.dueDate, nextDue);
 
     return { message: `Snoozed for ${Math.floor(minutes)} minutes`, task: row };
+  },
+
+  /**
+   * "Not now" on an alarm.
+   *
+   * Snoozing moves the task; this does not — the owner has seen it and chosen
+   * to leave it. Counting the dismissal is what eventually stops the alarm
+   * firing at someone who has already said no twice.
+   */
+  async dismissAlarm(userId: string, id: string) {
+    const before = await this.requireActionable(userId, id);
+
+    const row = await TasksModel.updateTask(id, {
+      alarmDismissals: (before.alarmDismissals ?? 0) + 1,
+    });
+    if (!row) throw new NotFoundError('Task not found');
+
+    await this.resyncSlots(before.userId, before.dueDate, row.dueDate);
+
+    return {
+      message: 'Alarm dismissed',
+      task: row,
+      alarmsRemaining: Math.max(0, 2 - (row.alarmDismissals ?? 0)),
+    };
   },
 
   /** Delete user task. Owner only. */

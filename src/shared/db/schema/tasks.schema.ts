@@ -1,4 +1,4 @@
-import { boolean, index, pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, pgTable, text, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
 import { users } from './auth';
 import { pets } from './pets.schema';
 
@@ -46,6 +46,24 @@ export const tasks = pgTable(
      */
     skippedAt: timestamp('skipped_at', { withTimezone: true }),
     skipReason: varchar('skip_reason', { length: 200 }),
+    /**
+     * Wake the owner if this one is missed.
+     *
+     * Opt-in per task, never inferred from the type. A full-screen alarm is the
+     * most intrusive thing the app can do, and an app that decides on its own
+     * what deserves it gets its notifications switched off wholesale — taking
+     * the doses that did matter with them. The owner chooses what is allowed to
+     * wake them.
+     */
+    alarmOnMiss: boolean('alarm_on_miss').notNull().default(false),
+    /**
+     * How many times the alarm was dismissed without the task being resolved.
+     *
+     * An alarm that keeps firing at someone who has twice said "not now" has
+     * stopped being a reminder. Two strikes and this task falls back to an
+     * ordinary notification; completing or skipping it clears the count.
+     */
+    alarmDismissals: integer('alarm_dismissals').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

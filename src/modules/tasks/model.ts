@@ -46,6 +46,7 @@ export const TasksModel = {
     frequency?: string;
     dueDate: Date;
     notes?: string;
+    alarmOnMiss?: boolean;
   }) {
     const rows = await db.insert(tasks).values(payload).returning();
     return rows[0] ?? null;
@@ -142,6 +143,8 @@ export const TasksModel = {
       completedBy: string | null;
       skippedAt: Date | null;
       skipReason: string | null;
+      alarmOnMiss: boolean;
+      alarmDismissals: number;
     }>,
   ) {
     const rows = await db

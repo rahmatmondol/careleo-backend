@@ -127,6 +127,13 @@
       "when": 1786876004498,
       "tag": "0017_bitter_ikaris",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786903758636,
+      "tag": "0018_useful_celestials",
+      "breakpoints": true
     }
   ]
 }

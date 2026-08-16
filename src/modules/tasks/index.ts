@@ -67,6 +67,16 @@ export const tasksController = new Elysia({ name: 'tasks-controller' }).group('/
       const minutes = Number((body as any)?.minutes ?? 30);
       return TasksService.snooze(authUser.id, String(params.id), minutes);
     })
+    /**
+     * "Not now" on a full-screen alarm — leaves the task where it is and
+     * records that the owner waved it off. Two of these and the task stops
+     * being allowed to take over the screen.
+     */
+    .post('/:id/alarm-dismissed', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      return TasksService.dismissAlarm(authUser.id, String(params.id));
+    })
     /** Delete task by id. */
     .delete('/:id', async (ctx: any) => {
       const { headers, jwt, params } = ctx;

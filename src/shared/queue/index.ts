@@ -80,12 +80,26 @@ const ESCALATION_STEPS_MIN = [15, 60] as const;
  */
 const CAREGIVER_ALERT_MIN = 120;
 
+/**
+ * When a task the owner asked to be woken for is still open this long after it
+ * was due, it stops being a notification and becomes an alarm — a full-screen
+ * takeover with a sound, the way a call arrives.
+ *
+ * Only tasks with `alarmOnMiss` ever reach this, and only until the owner has
+ * dismissed the same task twice. Anything that decides on its own what may
+ * wake someone gets the whole app's notifications switched off, which costs
+ * the doses that did matter.
+ */
+const ALARM_AFTER_MIN = 30;
+const ALARM_DISMISSAL_LIMIT = 2;
+
 const bucketStartOf = (due: Date) => Math.floor(due.getTime() / DIGEST_BUCKET_MS) * DIGEST_BUCKET_MS;
 
 const digestJobId = (userId: string, bucketStart: number) => `task_digest-${userId}-${bucketStart}`;
 const escalateJobId = (userId: string, bucketStart: number, step: number) =>
   `task_escalate-${userId}-${bucketStart}-${step}`;
 const caregiverJobId = (userId: string, bucketStart: number) => `task_caregiver-${userId}-${bucketStart}`;
+const alarmJobId = (taskId: string) => `task_alarm-${taskId}`;
 
 type BucketTask = {
   id: string;
@@ -95,7 +109,13 @@ type BucketTask = {
   title: string;
   taskType: string | null;
   dueDate: Date;
+  alarmOnMiss: boolean;
+  alarmDismissals: number;
 };
+
+/** Has the owner asked to be woken for this one, and not yet waved it off twice? */
+const wantsAlarm = (t: BucketTask) =>
+  t.alarmOnMiss && (t.alarmDismissals ?? 0) < ALARM_DISMISSAL_LIMIT;
 
 /** Every still-open task the user has in one slot, oldest first. */
 const openTasksInBucket = async (userId: string, bucketStart: number): Promise<BucketTask[]> => {
@@ -108,6 +128,8 @@ const openTasksInBucket = async (userId: string, bucketStart: number): Promise<B
       title: tasks.title,
       taskType: tasks.taskType,
       dueDate: tasks.dueDate,
+      alarmOnMiss: tasks.alarmOnMiss,
+      alarmDismissals: tasks.alarmDismissals,
     })
     .from(tasks)
     .leftJoin(pets, eq(tasks.petId, pets.id))
@@ -140,6 +162,18 @@ const refreshTaskBucket = async (userId: string, bucketStart: number) => {
     }
     await removeJob(caregiverJobId(userId, bucketStart));
     return;
+  }
+
+  // Alarms are per task, not per slot: each one takes over the whole screen, so
+  // two due together must not fire as one ambiguous "something is open".
+  for (const task of open) {
+    if (!wantsAlarm(task)) {
+      await removeJob(alarmJobId(task.id));
+      continue;
+    }
+    const at = task.dueDate.getTime() + ALARM_AFTER_MIN * 60_000;
+    if (at <= Date.now()) continue;
+    await upsertJob(alarmJobId(task.id), 'task_alarm', { taskId: task.id }, at - Date.now());
   }
 
   // Fire when the *last* task in the slot is actually due, so nothing is
@@ -274,6 +308,67 @@ const handleTaskDigest = async (userId: string, bucketStart: number) => {
       data: taskPushData(group, 'task_due'),
     });
   }
+};
+
+/**
+ * The alarm: a single task the owner asked to be woken for, still open half an
+ * hour after it was due.
+ *
+ * Sent as its own push with `alarm: '1'`, which is what makes the app draw a
+ * full-screen takeover instead of a notification. It deliberately bypasses
+ * `deliverToUser`: quiet hours and the category toggles exist so the phone
+ * stays quiet for routine care, and an alarm the owner explicitly asked for on
+ * this task is not routine. The per-task opt-in *is* the consent, and turning
+ * it off is one tap on the task.
+ */
+const handleTaskAlarm = async (taskId: string) => {
+  const rows = await db
+    .select({
+      id: tasks.id,
+      userId: tasks.userId,
+      petId: tasks.petId,
+      petName: pets.name,
+      title: tasks.title,
+      taskType: tasks.taskType,
+      dueDate: tasks.dueDate,
+      isCompleted: tasks.isCompleted,
+      skippedAt: tasks.skippedAt,
+      alarmOnMiss: tasks.alarmOnMiss,
+      alarmDismissals: tasks.alarmDismissals,
+    })
+    .from(tasks)
+    .leftJoin(pets, eq(tasks.petId, pets.id))
+    .where(eq(tasks.id, taskId))
+    .limit(1);
+
+  const task = rows[0];
+  // Re-checked here rather than trusted from scheduling time: the task may have
+  // been done, skipped, snoozed or had its alarm switched off since.
+  if (!task || task.isCompleted || task.skippedAt || !task.alarmOnMiss) return;
+  if ((task.alarmDismissals ?? 0) >= ALARM_DISMISSAL_LIMIT) return;
+  if (new Date(task.dueDate as any).getTime() > Date.now()) return;
+
+  const pet = task.petName ?? 'your pet';
+
+  await NotificationsService.sendToUsers(
+    [task.userId],
+    {
+      title: `${task.title} — still not done`,
+      body: `${pet} was due this half an hour ago. Tap to sort it out.`,
+      type: 'TASK_ALARM',
+      priority: 'critical',
+      data: {
+        event: 'task_alarm',
+        alarm: '1',
+        taskId: task.id,
+        petId: String(task.petId ?? ''),
+        petName: pet,
+        taskTitle: task.title,
+        dueDate: new Date(task.dueDate as any).toISOString(),
+      },
+    },
+    { targetMode: 'single' },
+  );
 };
 
 const handleTaskEscalation = async (userId: string, bucketStart: number, step: number) => {
@@ -586,6 +681,13 @@ export const startNotificationsWorker = () => {
         const step = Number(data.step ?? 0);
         if (!userId || !bucketStart || !step) return;
         await handleTaskEscalation(userId, bucketStart, step);
+        return;
+      }
+
+      if (job.name === 'task_alarm') {
+        const taskId = String(data.taskId ?? '');
+        if (!taskId) return;
+        await handleTaskAlarm(taskId);
         return;
       }
 
