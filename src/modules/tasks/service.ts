@@ -20,6 +20,15 @@ const parseDate = (value: unknown): Date | undefined => {
 const BACKDATE_LIMIT_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * How long a completion stays editable.
+ *
+ * Long enough to cover the mis-tap and the second thought, short enough that
+ * the care record stops moving. Deliberately not symmetric with the backdate
+ * limit: logging something late is normal, rewriting it days later is not.
+ */
+const UNDO_WINDOW_MS = 4 * 60 * 60 * 1000;
+
+/**
  * When the task was really done.
  *
  * Marking a 7am feeding at 9am used to record 9am, which is the number that
@@ -169,12 +178,26 @@ export const TasksService = {
   /**
    * Undo a completion.
    *
+   * Undo exists for the mis-tap, not for editing history. Past the window a
+   * completion is a care record — a dose logged three weeks ago is what a vet
+   * is shown, and it should not quietly change. Marking something done late is
+   * still always allowed; only rewriting it afterwards is bounded.
+   *
    * The spawned next occurrence goes with it — otherwise undoing a mis-tap
    * leaves tomorrow's task sitting there, created by something that never
    * happened. Only an untouched future occurrence is removed.
    */
   async uncomplete(userId: string, id: string) {
     const before = await this.requireActionable(userId, id);
+
+    if (before.isCompleted && before.completedAt) {
+      const age = Date.now() - new Date(before.completedAt as any).getTime();
+      if (age > UNDO_WINDOW_MS) {
+        throw new ValidationError(
+          'This was completed more than 4 hours ago and can no longer be undone.',
+        );
+      }
+    }
 
     const row = await TasksModel.updateTask(id, {
       isCompleted: false,
@@ -187,11 +210,19 @@ export const TasksService = {
 
     let removedNext = false;
     if (before.isCompleted && before.petId && parseRecurrence(before.frequency) !== 'none') {
+      const dueDate = new Date(before.dueDate as any);
+      // Bound the search to the one period this completion could have spawned.
+      // "Earliest open task after the old due date" used to reach past it and
+      // delete a later, legitimately scheduled occurrence.
+      const expected = nextOccurrenceAfter(dueDate, before.frequency);
+      const periodEnd = expected ? nextOccurrenceAfter(expected, before.frequency) : null;
+
       const spawned = await TasksModel.findSpawnedOccurrence(
         before.userId,
         before.petId,
         before.title,
-        new Date(new Date(before.dueDate as any).getTime() + 60_000),
+        new Date(dueDate.getTime() + 60_000),
+        periodEnd ?? undefined,
       );
       if (spawned) {
         const deleted = await TasksModel.deleteById(spawned.id);

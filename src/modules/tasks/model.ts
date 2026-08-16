@@ -185,7 +185,15 @@ export const TasksModel = {
    * Un-completing has to take it back, or undoing a mis-tap leaves tomorrow's
    * task sitting there as a duplicate of one that never happened.
    */
-  async findSpawnedOccurrence(userId: string, petId: string, title: string, after: Date) {
+  /**
+   * The occurrence a completion spawned, if it is still untouched.
+   *
+   * `before` bounds the search to the single recurrence period that completion
+   * could have created. Without it the query reaches arbitrarily far forward
+   * and returns whatever open task happens to be next — which, undoing an older
+   * completion, is today's legitimately scheduled one.
+   */
+  async findSpawnedOccurrence(userId: string, petId: string, title: string, after: Date, before?: Date) {
     const rows = await db
       .select({ id: tasks.id, dueDate: tasks.dueDate })
       .from(tasks)
@@ -196,6 +204,7 @@ export const TasksModel = {
           eq(tasks.title, title),
           isOpenTask(),
           gte(tasks.dueDate, after),
+          ...(before ? [lt(tasks.dueDate, before)] : []),
         ),
       )
       .orderBy(asc(tasks.dueDate))
