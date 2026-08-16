@@ -220,6 +220,17 @@ export const NotificationsService = {
     return { success: true };
   },
 
+  async deleteNotification(id: string, userId: string) {
+    const row = await NotificationsModel.deleteNotification(id, userId);
+    if (!row) throw new ValidationError('Notification not found');
+    return { success: true, id: row.id };
+  },
+
+  async deleteAllNotifications(userId: string, readOnly = false) {
+    const deleted = await NotificationsModel.deleteAllNotifications(userId, readOnly);
+    return { success: true, deleted };
+  },
+
   // ── Admin notification feed ──────────────────────────────────
 
   async adminFeed(adminId: string, limit = 30) {

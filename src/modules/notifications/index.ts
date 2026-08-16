@@ -65,6 +65,18 @@ export const notificationsController = new Elysia({ name: 'notifications-control
         const { headers, jwt } = ctx;
         const authUser = await requireAuth(headers, jwt);
         return NotificationsService.markAllNotificationsRead(authUser.id);
+      })
+      .delete('/:id', async (ctx: any) => {
+        const { headers, jwt, params } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+        return NotificationsService.deleteNotification(String(params.id), authUser.id);
+      })
+      // `?readOnly=true` keeps anything the user has not seen yet.
+      .delete('/', async (ctx: any) => {
+        const { headers, jwt, query } = ctx;
+        const authUser = await requireAuth(headers, jwt);
+        const readOnly = String((query as any)?.readOnly ?? '') === 'true';
+        return NotificationsService.deleteAllNotifications(authUser.id, readOnly);
       }),
   )
   .group('/admin/notifications', (app) =>

@@ -187,6 +187,26 @@ export const NotificationsModel = {
       .set({ isRead: true, readAt: new Date() })
       .where(and(eq(userNotifications.userId, userId), eq(userNotifications.isRead, false)));
   },
+
+  async deleteNotification(id: string, userId: string) {
+    const row = await db
+      .delete(userNotifications)
+      .where(and(eq(userNotifications.id, id), eq(userNotifications.userId, userId)))
+      .returning({ id: userNotifications.id });
+    return row[0] ?? null;
+  },
+
+  /** `readOnly` clears the history but leaves anything still unseen in place. */
+  async deleteAllNotifications(userId: string, readOnly = false) {
+    const conditions = [eq(userNotifications.userId, userId)];
+    if (readOnly) conditions.push(eq(userNotifications.isRead, true));
+
+    const rows = await db
+      .delete(userNotifications)
+      .where(and(...conditions))
+      .returning({ id: userNotifications.id });
+    return rows.length;
+  },
 };
 
 // ── Admin notification feed ────────────────────────────────────────────────
