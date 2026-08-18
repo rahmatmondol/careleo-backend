@@ -1,7 +1,17 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { db } from '@/shared/db';
-import { addresses, cartItems, products, orders, orderItems, productInventoryLogs } from '@/shared/db/schema';
+import {
+  addresses,
+  cartItems,
+  products,
+  orders,
+  orderItems,
+  productInventoryLogs,
+  coupons,
+  couponRedemptions,
+} from '@/shared/db/schema';
 import { commitUsage, resolveCoverage, type CoverageInput } from '@/modules/subscriptions/coverage';
+import { evaluateCoupon, roundMoney } from '@/modules/marketing/coupon-rules';
 
 /** Thrown inside the order transaction to roll back and surface a clean error. */
 class OrderError extends Error {
@@ -169,6 +179,66 @@ export async function quoteCart(userId: string, addressId?: string | null){
  * all and is marked NOT_REQUIRED. Online providers set their own values once a
  * real gateway is wired in.
  */
+/**
+ * Validate and spend a coupon, inside the caller's order transaction.
+ *
+ * The coupon row is taken with `SELECT … FOR UPDATE` and its usage re-checked
+ * *after* the lock is held. This is the whole point of doing it here rather
+ * than trusting the storefront's preview call: two customers racing for the
+ * last use of a code would otherwise both read `usedCount = 99` against a limit
+ * of 100 and both redeem it. Holding the lock until the transaction commits
+ * means the second one sees 100 and is refused.
+ *
+ * A bad code fails the order rather than being ignored. Silently dropping it
+ * would charge the customer full price for a checkout they confirmed expecting
+ * a discount.
+ */
+async function applyCouponInTransaction(
+  tx: any,
+  userId: string,
+  code: string | null,
+  cart: { payableTotal: number; lines: { productId: string; unitPrice: number; quantity: number }[] },
+): Promise<{ couponId: string | null; couponCode: string | null; discount: number }> {
+  const trimmed = String(code ?? '').trim().toUpperCase();
+  if (!trimmed) return { couponId: null, couponCode: null, discount: 0 };
+
+  const [coupon] = await tx
+    .select()
+    .from(coupons)
+    .where(eq(coupons.code, trimmed))
+    .limit(1)
+    .for('update');
+  if (!coupon) throw new OrderError('That coupon code was not found', 404);
+
+  const [redeemed] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(couponRedemptions)
+    .where(and(eq(couponRedemptions.couponId, coupon.id), eq(couponRedemptions.userId, userId)));
+
+  const allowed = new Set<string>(coupon.applicableProductIds ?? []);
+  const eligibleAmount = cart.lines
+    .filter((l) => allowed.has(l.productId))
+    .reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+
+  const verdict = evaluateCoupon(coupon, {
+    payableAmount: cart.payableTotal,
+    eligibleAmount,
+    productIds: cart.lines.map((l) => l.productId),
+    userRedemptions: Number(redeemed?.n ?? 0),
+    now: new Date(),
+  });
+  if (!verdict.ok) throw new OrderError(verdict.reason, 400);
+
+  // Incremented under the same lock the check above ran on, so the count the
+  // next transaction reads already includes this redemption.
+  await tx
+    .update(coupons)
+    .set({ usedCount: coupon.usedCount + 1, updatedAt: new Date() })
+    .where(eq(coupons.id, coupon.id));
+
+  return { couponId: coupon.id, couponCode: coupon.code, discount: verdict.discount };
+}
+
 export type CreateOrderOptions = {
   addressId?: string | null;
   shippingAddress?: string | null;
@@ -176,6 +246,11 @@ export type CreateOrderOptions = {
   source?: string;
   /** Background flows can opt out; on by default so auto re-orders benefit too. */
   applyCoverage?: boolean;
+  /**
+   * Discount code the customer typed. Validated and spent inside the order
+   * transaction, never trusted from an earlier preview call.
+   */
+  couponCode?: string | null;
 };
 
 export async function createOrderForUser(userId: string, items: { productId: string; quantity: number }[], opts: CreateOrderOptions = {}){
@@ -219,21 +294,47 @@ export async function createOrderForUser(userId: string, items: { productId: str
       const coveredTotal = coverage?.coveredTotal ?? 0;
       const payableTotal = coverage?.payableTotal ?? subtotal;
 
+      /**
+       * Coupons discount what the customer still owes, never the whole order.
+       *
+       * The subscription benefit is applied first, so a plan that already paid
+       * for the food cannot then be discounted again — that would be giving
+       * the same money away twice.
+       */
+      const applied = await applyCouponInTransaction(tx, userId, opts.couponCode ?? null, {
+        payableTotal,
+        lines,
+      });
+      const finalPayable = roundMoney(Math.max(0, payableTotal - applied.discount));
+
       const order = await tx.insert(orders).values({
         userId,
         totalAmount: String(subtotal),
         subtotal: String(subtotal),
         coveredAmount: String(coveredTotal),
-        payableAmount: String(payableTotal),
+        payableAmount: String(finalPayable),
+        discountAmount: String(applied.discount),
+        couponId: applied.couponId,
+        couponCode: applied.couponCode,
         addressId: address.addressId,
         shippingAddress: address.shippingAddress,
         paymentMethod: opts.paymentMethod ?? 'COD',
-        // Nothing to collect when the plan paid for the whole order.
-        paymentStatus: payableTotal <= 0 ? 'NOT_REQUIRED' : 'PENDING',
+        // Nothing to collect when the plan (or the plan plus a coupon) covered it all.
+        paymentStatus: finalPayable <= 0 ? 'NOT_REQUIRED' : 'PENDING',
         source: opts.source ?? 'checkout',
         benefitPeriodStart: coveredTotal > 0 ? coverage?.benefit?.periodStart ?? null : null,
         coverageMetaJson: coveredTotal > 0 ? JSON.stringify(coverage?.qtyByRule ?? {}) : null,
       }).returning();
+
+      if (applied.couponId) {
+        await tx.insert(couponRedemptions).values({
+          couponId: applied.couponId,
+          userId,
+          orderId: order[0]!.id,
+          discountAmount: String(applied.discount),
+          orderAmount: String(payableTotal),
+        });
+      }
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]!;
@@ -273,6 +374,8 @@ export type CheckoutInput = {
   paymentMethod?: string;
   /** Legacy free-text address; kept so older app builds keep working. */
   shippingAddress?: string;
+  /** Discount code; re-validated inside the order transaction. */
+  couponCode?: string;
 };
 
 /**
@@ -310,6 +413,7 @@ export async function checkout(userId: string, input: CheckoutInput = {}){
       shippingAddress: input.shippingAddress ?? null,
       paymentMethod,
       source: 'checkout',
+      couponCode: input.couponCode ?? null,
     },
   );
   if ((result as any).error) return result;

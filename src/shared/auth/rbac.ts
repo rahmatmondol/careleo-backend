@@ -11,7 +11,8 @@ export type Permission =
   | 'sync.manage'
   | 'plans.manage'
   | 'vets.read'
-  | 'vets.write';
+  | 'vets.write'
+  | 'marketing.manage';
 
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   super_admin: [
@@ -26,6 +27,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'plans.manage',
     'vets.read',
     'vets.write',
+    'marketing.manage',
   ],
   admin: [
     'users.read',
@@ -37,6 +39,9 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'plans.manage',
     'vets.read',
     'vets.write',
+    // Coupons move money, so support can read the marketing dashboard through
+    // orders.read but cannot mint discount codes.
+    'marketing.manage',
   ],
   // Support can look up a vet to answer a booking question, not edit the roster.
   support: ['users.read', 'pets.read', 'orders.read', 'vets.read'],

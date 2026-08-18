@@ -279,6 +279,18 @@ export const orders = pgTable(
     paymentStatus: varchar('payment_status', { length: 30 }).default('PENDING').notNull(),
     // Origin of the order: 'checkout' (user), 'subscription' (recurring), 'auto_reorder' (AI).
     source: varchar('source', { length: 30 }).default('checkout').notNull(),
+
+    /**
+     * Discount applied by a coupon, already subtracted from `payableAmount`.
+     *
+     * No foreign key to `coupons`: an order is a financial record and must
+     * survive a coupon being deleted, the same reasoning the file header gives
+     * for not cascading orders from `users`. The authoritative link is the
+     * `coupon_redemptions` row, which does cascade.
+     */
+    couponId: uuid('coupon_id'),
+    couponCode: varchar('coupon_code', { length: 60 }),
+    discountAmount: decimal('discount_amount', { precision: 10, scale: 2 }).default('0').notNull(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
   (t) => [

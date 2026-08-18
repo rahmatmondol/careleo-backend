@@ -26,5 +26,6 @@ export async function checkoutController(user: any, body: any){
     addressId: body?.addressId,
     paymentMethod: body?.paymentMethod,
     shippingAddress: body?.shippingAddress,
+    couponCode: body?.couponCode,
   }));
 }

@@ -23,4 +23,4 @@ export const cartRoutes = shopBase()
    * renders this rather than computing coverage itself.
    */
   .get('/cart/quote', ({ user, query }) => quoteCartController(user, query), { query: t.Optional(t.Object({ addressId: t.Optional(t.String()) })) })
-  .post('/cart/checkout', ({ user, body }) => checkoutController(user, body), { body: t.Optional(t.Object({ addressId: t.Optional(t.String()), paymentMethod: t.Optional(t.String()), shippingAddress: t.Optional(t.String()) })) });
+  .post('/cart/checkout', ({ user, body }) => checkoutController(user, body), { body: t.Optional(t.Object({ addressId: t.Optional(t.String()), paymentMethod: t.Optional(t.String()), shippingAddress: t.Optional(t.String()), couponCode: t.Optional(t.String()) })) });
