@@ -3,6 +3,7 @@ import { ValidationError, UnauthorizedError } from '@/shared/errors';
 import { AuthModel } from './model';
 import { ROLE_PERMISSIONS, type Role } from '@/shared/auth/rbac';
 import { verifyFirebaseIdToken } from '@/shared/integrations/firebase';
+import { sendPasswordResetEmail } from '@/shared/integrations/mailer';
 import { NotificationsService } from '@/modules/notifications/service';
 
 const splitName = (name?: string | null) => {
@@ -189,18 +190,44 @@ export const AuthService = {
     const email = String(payload.email ?? '').trim().toLowerCase();
     if (!email) throw new ValidationError('email is required');
 
+    /**
+     * The response is identical whether or not the address exists, and it
+     * NEVER contains the token.
+     *
+     * This endpoint is unauthenticated, so anything it returns is readable by
+     * anyone who can guess an email address. Returning the reset token here —
+     * which this did until August 2026 — meant a full account takeover in two
+     * unauthenticated calls: ask for the token, then spend it at
+     * /auth/reset-password. The token now only ever reaches the account owner's
+     * inbox.
+     *
+     * The constant response also stops this being an account-enumeration
+     * oracle: a different message (or a different latency) for a registered
+     * address tells an attacker which emails have accounts.
+     */
+    const generic = { message: 'If that email has an account, reset instructions are on their way.' };
+
     const user = await AuthModel.findByEmail(email);
-    if (!user) return { message: 'If the email exists, reset instructions were sent.' };
+    if (!user) return generic;
 
     const token = generateToken();
     const expiresAt = new Date(Date.now() + 1000 * 60 * 30);
     await AuthModel.createAuthToken({ userId: user.id, token, type: 'password_reset', expiresAt });
 
-    return {
-      message: 'Reset token generated.',
+    const mail = await sendPasswordResetEmail({
+      to: email,
+      firstName: user.firstName,
       token,
-      expiresAt: expiresAt.toISOString(),
-    };
+    });
+
+    if (!mail.sent) {
+      // Logged, not surfaced: telling the caller the mail failed would leak
+      // that the address exists. An operator watching logs is the right
+      // audience for "SMTP is down", not whoever typed the address.
+      console.error(`[auth] password reset email to ${email} was not sent: ${mail.reason}`);
+    }
+
+    return generic;
   },
 
   /** Verify email with one-time token. */

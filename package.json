@@ -27,6 +27,7 @@
     "elysia-rate-limit": "^4.6.0",
     "firebase-admin": "^13.10.0",
     "ioredis": "^5.8.0",
+    "nodemailer": "^9.0.5",
     "openai": "^6.42.0",
     "pg": "^8.21.0",
     "sharp": "^0.32.0",
@@ -35,6 +36,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "drizzle-kit": "^0.31.10",
     "typescript": "5.9.3"
