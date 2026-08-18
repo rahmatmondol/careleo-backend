@@ -15,6 +15,7 @@ export * from './notification-preferences.schema';
 export * from './care.schema';
 export * from './admin-notifications.schema';
 export * from './subscriptions.schema';
+export * from './marketing.schema';
 export * from './pet-profiles.schema';
 export * from './food-inventory.schema';
 

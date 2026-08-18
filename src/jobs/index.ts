@@ -16,6 +16,8 @@ import { runPhotoCheckinJob } from './photo-checkin.job';
 import { runWeatherAdvisoryJob } from './weather-advisory.job';
 import { runMilestonesJob } from './milestones.job';
 import { runVetPrepJob } from './vet-prep.job';
+import { runRevenueCatReconcileJob } from './revenuecat-reconcile.job';
+import { runAbandonedCartJob } from './abandoned-cart.job';
 import { startSubscriptionRunner } from '@/modules/shop/jobs/subscription-runner';
 
 const TASK_CHECKER_INTERVAL_MS = 30 * 60 * 1000;  // 30 minutes
@@ -39,6 +41,21 @@ const WEATHER_ADVISORY_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const VET_PREP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MILESTONES_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+/**
+ * Catch RevenueCat subscriptions whose period lapsed without an EXPIRATION
+ * webhook. Hourly is frequent enough: entitlement is already correct the
+ * moment the period ends (see subscriptions/model.ts), this only tidies the
+ * stored status behind it.
+ */
+const REVENUECAT_RECONCILE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Abandoned-cart recovery. Hourly is the finest cadence that makes sense: the
+ * rules themselves are configured in hours, and the job dedupes on cart
+ * contents, so ticking more often would only re-scan the same carts.
+ */
+const ABANDONED_CART_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
 let taskCheckerTimer: ReturnType<typeof setInterval> | null = null;
 let aiNudgeTimer: ReturnType<typeof setInterval> | null = null;
 let dailyCheckinTimer: ReturnType<typeof setInterval> | null = null;
@@ -52,6 +69,8 @@ let photoCheckinTimer: ReturnType<typeof setInterval> | null = null;
 let weatherAdvisoryTimer: ReturnType<typeof setInterval> | null = null;
 let vetPrepTimer: ReturnType<typeof setInterval> | null = null;
 let milestonesTimer: ReturnType<typeof setInterval> | null = null;
+let revenueCatReconcileTimer: ReturnType<typeof setInterval> | null = null;
+let abandonedCartTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startJobs() {
   console.log('[Jobs] Starting background jobs...');
@@ -199,6 +218,29 @@ export function startJobs() {
     }
   }, MILESTONES_INTERVAL_MS);
 
+  revenueCatReconcileTimer = setInterval(async () => {
+    try {
+      const result = await runRevenueCatReconcileJob();
+      if (result.reconciled > 0 || result.failed > 0) {
+        console.log(`[Jobs] revenuecat-reconcile: ${result.reconciled} reconciled, ${result.failed} failed`);
+      }
+    } catch (err) {
+      console.error('[Jobs] revenuecat-reconcile error:', err);
+    }
+  }, REVENUECAT_RECONCILE_INTERVAL_MS);
+
+  // No startup run: a redeploy must not fire a burst of recovery emails.
+  abandonedCartTimer = setInterval(async () => {
+    try {
+      const result = await runAbandonedCartJob();
+      if (result.sent > 0 || result.recovered > 0) {
+        console.log(`[Jobs] abandoned-cart: ${result.sent} sent, ${result.recovered} recovered`);
+      }
+    } catch (err) {
+      console.error('[Jobs] abandoned-cart error:', err);
+    }
+  }, ABANDONED_CART_INTERVAL_MS);
+
   /**
    * "Subscribe & save" recurring orders.
    *
@@ -227,6 +269,8 @@ export function stopJobs() {
   if (weatherAdvisoryTimer) clearInterval(weatherAdvisoryTimer);
   if (vetPrepTimer) clearInterval(vetPrepTimer);
   if (milestonesTimer) clearInterval(milestonesTimer);
+  if (revenueCatReconcileTimer) clearInterval(revenueCatReconcileTimer);
+  if (abandonedCartTimer) clearInterval(abandonedCartTimer);
   console.log('[Jobs] Background jobs stopped.');
 }
 

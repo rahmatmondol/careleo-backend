@@ -134,6 +134,20 @@
       "when": 1786903758636,
       "tag": "0018_useful_celestials",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787040537509,
+      "tag": "0019_loving_captain_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1787076837887,
+      "tag": "0020_majestic_azazel",
+      "breakpoints": true
     }
   ]
 }

@@ -24,6 +24,8 @@ import { vetsController } from './modules/vets/index';
 import { vetsAdminController } from './modules/vets/admin-index';
 import { walkersController } from './modules/walkers/index';
 import { adminSubscriptionsController, subscriptionsController } from './modules/subscriptions/index';
+import { adminRevenueCatController, revenueCatController } from './modules/subscriptions/revenuecat/index';
+import { adminMarketingController, marketingController } from './modules/marketing/index';
 import { petProfileController } from './modules/pet-profile/index';
 import { foodInventoryController } from './modules/food-inventory/index';
 import { vaccinationsController } from './modules/vaccinations/index';
@@ -75,11 +77,19 @@ export const app = new Elysia()
    * process. The gateway was removed once every domain became a module here
    * (its other jobs — CORS and Swagger — this app already did itself), so the
    * limit moved in with it. Tune with RATE_LIMIT_MAX / RATE_LIMIT_WINDOW_MS.
+   *
+   * The RevenueCat webhook is exempt. It arrives from RevenueCat's servers, so
+   * every delivery shares one client key, and renewals are batched — a busy
+   * renewal hour would blow through 100/min and get throttled wholesale.
+   * Retries would eventually get through, but each rejected delivery is a user
+   * sitting on the wrong tier in the meantime, and the route is already
+   * authenticated by a shared secret rather than by being hard to reach.
    */
   .use(
     rateLimit({
       duration: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
       max: Number(process.env.RATE_LIMIT_MAX) || 100,
+      skip: (req) => new URL(req.url).pathname.endsWith('/subscriptions/revenuecat/webhook'),
     })
   )
   .use(
@@ -134,7 +144,13 @@ export const app = new Elysia()
       .use(vetsController)
       .use(walkersController)
       .use(adminSubscriptionsController)
+      // Before subscriptionsController so `/subscriptions/revenuecat/*` is not
+      // shadowed by any future `/subscriptions/:id` route.
+      .use(revenueCatController)
+      .use(adminRevenueCatController)
       .use(subscriptionsController)
+      .use(adminMarketingController)
+      .use(marketingController)
       .use(petProfileController)
       .use(foodInventoryController)
       .use(vaccinationsController)
