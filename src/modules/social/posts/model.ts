@@ -83,7 +83,7 @@ export const PostsModel = {
 
   /** Post counts per day for the last `days` days (oldest → newest), for the engagement trend. */
   async dailyCounts(days = 7) {
-    const rows = await db.execute(sql`
+    const result = await db.execute(sql`
       SELECT to_char(d.day, 'YYYY-MM-DD') AS day, count(p.id)::int AS c
       FROM generate_series(
         (now()::date - ${sql.raw(String(days - 1))} * interval '1 day'),
@@ -94,6 +94,15 @@ export const PostsModel = {
       GROUP BY d.day
       ORDER BY d.day ASC
     `);
-    return (rows as unknown as Array<{ day: string; c: number }>).map((r) => Number(r.c));
+
+    // `db.execute` returns node-postgres' QueryResult (`{ rows, … }`), not a
+    // bare array — the driver decides this, and only the `postgres.js` one
+    // returns an array. Treating the result as an array is what made
+    // /social/admin/analytics fail with ".map is not a function", taking the
+    // whole admin dashboard down with it. Both shapes are accepted so this
+    // survives a driver swap.
+    const rows: Record<string, unknown>[] = Array.isArray(result) ? result : (result?.rows ?? []);
+
+    return rows.map((r) => Number(r.c));
   },
 };
