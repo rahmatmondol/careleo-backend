@@ -15,6 +15,46 @@ import { invalidateEntitlement, resolveEntitlement } from './entitlements';
 const FEATURE_SET = new Set<string>(FEATURE_KEYS);
 const LIMIT_SET = new Set<string>(LIMIT_KEYS);
 
+/** The plan fields that map a plan onto what RevenueCat actually sells. */
+const RC_ID_FIELDS = ['rcEntitlementId', 'rcProductIdIos', 'rcProductIdAndroid', 'rcProductIdWeb'] as const;
+type RcIdField = (typeof RC_ID_FIELDS)[number];
+
+/**
+ * Store identifiers are opaque strings, so the only validation possible is
+ * shape: trim it, treat blank as "not mapped", and refuse anything longer than
+ * the column. Sending an over-long id would otherwise fail as a database
+ * error the admin cannot interpret.
+ */
+const sanitizeRcId = (value: unknown, field: string): string | null => {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  if (trimmed.length > 190) throw new ValidationError(`${field} must be 190 characters or fewer`);
+  return trimmed;
+};
+
+/** Copy whichever RevenueCat ids the request actually sent onto a patch. */
+const applyRcIds = (body: Record<string, unknown>, target: Record<string, unknown>): void => {
+  for (const field of RC_ID_FIELDS) {
+    if (body[field] !== undefined) target[field] = sanitizeRcId(body[field], field);
+  }
+};
+
+/**
+ * One entitlement id may only belong to one plan.
+ *
+ * Two plans claiming "premium" would make the webhook's plan lookup depend on
+ * row order — the user's tier would then be whichever plan Postgres happened
+ * to return first. Rejecting the clash here keeps that impossible.
+ */
+const assertRcEntitlementFree = async (entitlementId: string | null, selfId?: string): Promise<void> => {
+  if (!entitlementId) return;
+  const clash = await SubscriptionsModel.getPlanByRcEntitlement(entitlementId);
+  if (clash && clash.id !== selfId) {
+    throw new ValidationError(`Plan "${clash.name}" already maps to RevenueCat entitlement "${entitlementId}"`);
+  }
+};
+
 /** Keep only recognised feature keys with boolean values. */
 const sanitizeFeatureFlags = (input: unknown): FeatureFlags => {
   if (!input || typeof input !== 'object') return {};
@@ -61,6 +101,10 @@ export const SubscriptionsService = {
     if (await SubscriptionsModel.getPlanByName(name)) {
       throw new ValidationError(`A plan named "${name}" already exists`);
     }
+    const rcIds: Record<string, unknown> = {};
+    applyRcIds(body, rcIds);
+    await assertRcEntitlementFree((rcIds.rcEntitlementId as string | null) ?? null);
+
     return SubscriptionsModel.createPlan({
       name,
       description: body.description != null ? String(body.description) : null,
@@ -70,6 +114,7 @@ export const SubscriptionsService = {
       limits: sanitizeLimits(body.limits),
       isActive: body.isActive != null ? Boolean(body.isActive) : undefined,
       sortOrder: body.sortOrder != null ? Number(body.sortOrder) : undefined,
+      ...(rcIds as Partial<Record<RcIdField, string | null>>),
     });
   },
 
@@ -89,6 +134,10 @@ export const SubscriptionsService = {
     if (body.limits !== undefined) patch.limits = sanitizeLimits(body.limits);
     if (body.isActive != null) patch.isActive = Boolean(body.isActive);
     if (body.sortOrder != null) patch.sortOrder = Number(body.sortOrder);
+    applyRcIds(body, patch);
+    if (patch.rcEntitlementId !== undefined) {
+      await assertRcEntitlementFree(patch.rcEntitlementId as string | null, id);
+    }
     return SubscriptionsModel.updatePlan(id, patch);
   },
 

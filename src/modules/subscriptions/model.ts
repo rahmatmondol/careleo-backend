@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, or } from 'drizzle-orm';
 import { db } from '@/shared/db';
 import {
   categories,
@@ -31,6 +31,23 @@ export const SubscriptionsModel = {
     return row;
   },
 
+  /** Every plan that maps to a RevenueCat entitlement or store product. */
+  listRevenueCatMappedPlans: async (): Promise<PlanRow[]> => {
+    const rows = await db.select().from(subscriptionPlans);
+    return rows.filter(
+      (p) => p.rcEntitlementId || p.rcProductIdIos || p.rcProductIdAndroid || p.rcProductIdWeb,
+    );
+  },
+
+  /** The plan (if any) already claiming a RevenueCat entitlement id. */
+  getPlanByRcEntitlement: async (entitlementId: string): Promise<PlanRow | undefined> => {
+    const [row] = await db
+      .select()
+      .from(subscriptionPlans)
+      .where(eq(subscriptionPlans.rcEntitlementId, entitlementId));
+    return row;
+  },
+
   createPlan: async (input: {
     name: string;
     description?: string | null;
@@ -40,6 +57,10 @@ export const SubscriptionsModel = {
     limits?: PlanLimits;
     isActive?: boolean;
     sortOrder?: string | number;
+    rcEntitlementId?: string | null;
+    rcProductIdIos?: string | null;
+    rcProductIdAndroid?: string | null;
+    rcProductIdWeb?: string | null;
   }): Promise<PlanRow> => {
     const [row] = await db
       .insert(subscriptionPlans)
@@ -52,6 +73,10 @@ export const SubscriptionsModel = {
         limits: input.limits ?? {},
         isActive: input.isActive,
         sortOrder: input.sortOrder !== undefined ? String(input.sortOrder) : undefined,
+        rcEntitlementId: input.rcEntitlementId ?? null,
+        rcProductIdIos: input.rcProductIdIos ?? null,
+        rcProductIdAndroid: input.rcProductIdAndroid ?? null,
+        rcProductIdWeb: input.rcProductIdWeb ?? null,
       })
       .returning();
     return row;
@@ -68,6 +93,10 @@ export const SubscriptionsModel = {
       limits: PlanLimits;
       isActive: boolean;
       sortOrder: string | number;
+      rcEntitlementId: string | null;
+      rcProductIdIos: string | null;
+      rcProductIdAndroid: string | null;
+      rcProductIdWeb: string | null;
     }>,
   ): Promise<PlanRow | undefined> => {
     const values: Record<string, unknown> = { updatedAt: new Date() };
@@ -79,6 +108,10 @@ export const SubscriptionsModel = {
     if (patch.limits !== undefined) values.limits = patch.limits;
     if (patch.isActive !== undefined) values.isActive = patch.isActive;
     if (patch.sortOrder !== undefined) values.sortOrder = String(patch.sortOrder);
+    if (patch.rcEntitlementId !== undefined) values.rcEntitlementId = patch.rcEntitlementId;
+    if (patch.rcProductIdIos !== undefined) values.rcProductIdIos = patch.rcProductIdIos;
+    if (patch.rcProductIdAndroid !== undefined) values.rcProductIdAndroid = patch.rcProductIdAndroid;
+    if (patch.rcProductIdWeb !== undefined) values.rcProductIdWeb = patch.rcProductIdWeb;
     const [row] = await db
       .update(subscriptionPlans)
       .set(values)
@@ -92,29 +125,74 @@ export const SubscriptionsModel = {
   },
 
   // ── User subscriptions ─────────────────────────────────────────────────────
+  /**
+   * The subscription whose entitlements apply right now.
+   *
+   * The period end is checked here, not just the status, because a store-billed
+   * subscription stops being paid for at a moment RevenueCat tells us about
+   * afterwards: if the EXPIRATION webhook is delayed, retried or dropped, the
+   * row still says 'active'. Treating a lapsed period as no subscription means
+   * the worst a missed webhook can do is end access on time. Manually granted
+   * rows leave `currentPeriodEnd` null and so never lapse.
+   */
   getActiveSubscription: async (userId: string): Promise<SubscriptionRow | undefined> => {
     const [row] = await db
       .select()
       .from(userSubscriptions)
-      .where(and(eq(userSubscriptions.userId, userId), eq(userSubscriptions.status, 'active')));
+      .where(
+        and(
+          eq(userSubscriptions.userId, userId),
+          eq(userSubscriptions.status, 'active'),
+          or(isNull(userSubscriptions.currentPeriodEnd), gt(userSubscriptions.currentPeriodEnd, new Date())),
+        ),
+      )
+      .orderBy(desc(userSubscriptions.updatedAt));
     return row;
   },
 
-  /** Upsert the user's subscription to a plan (one active subscription per user). */
+  /** The user's subscription row whatever its state — what a status change updates. */
+  getLatestSubscription: async (userId: string): Promise<SubscriptionRow | undefined> => {
+    const [row] = await db
+      .select()
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.userId, userId))
+      .orderBy(desc(userSubscriptions.updatedAt));
+    return row;
+  },
+
+  /**
+   * Upsert the user's subscription to a plan (one active subscription per user).
+   *
+   * This is the *manual* path — an admin grant or the legacy /subscribe route.
+   * It writes `provider: 'manual'` and clears the RevenueCat provenance, so a
+   * row a human granted is never mistaken for one the webhook owns.
+   */
   setSubscription: async (userId: string, planId: string): Promise<SubscriptionRow> => {
-    const existing = await SubscriptionsModel.getActiveSubscription(userId);
+    const existing = await SubscriptionsModel.getLatestSubscription(userId);
+    const manual = {
+      planId,
+      status: 'active' as const,
+      provider: 'manual',
+      store: null,
+      rcAppUserId: null,
+      rcEntitlementId: null,
+      rcProductId: null,
+      rcOriginalTransactionId: null,
+      currentPeriodEnd: null,
+      cancelAtPeriodEnd: false,
+      willRenew: true,
+      isTrial: false,
+      lastEventAtMs: null,
+    };
     if (existing) {
       const [row] = await db
         .update(userSubscriptions)
-        .set({ planId, status: 'active', updatedAt: new Date() })
+        .set({ ...manual, updatedAt: new Date() })
         .where(eq(userSubscriptions.id, existing.id))
         .returning();
       return row;
     }
-    const [row] = await db
-      .insert(userSubscriptions)
-      .values({ userId, planId, status: 'active' })
-      .returning();
+    const [row] = await db.insert(userSubscriptions).values({ userId, ...manual }).returning();
     return row;
   },
 
