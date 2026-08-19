@@ -23,6 +23,8 @@ import {
 } from './model-registry';
 import { generateText, parseJsonResponse } from './generate';
 import { CURRENCY_CODE, CURRENCY_SYMBOL } from '@/shared/types/currency';
+import { getPreferenceContext } from '@/modules/notifications/preferences';
+import { describeNowInZone } from '@/shared/types/timezone';
 import { streamChatTurn, type ChatImage, type ChatStreamEvent } from './stream';
 
 // ─── Provider-specific chat clients ──────────────────────────────────────────
@@ -237,6 +239,10 @@ async function findKnownDietBrand(userId: string, excludePetId?: string): Promis
 // ─── Context builder for chat system prompt ───────────────────────────────
 export async function buildSystemPrompt(userId: string, petId?: string): Promise<string> {
   const allPets = await AiModel.getUserPets(userId);
+  // The assistant schedules things, so it needs the clock the user is looking
+  // at — not just the date, and not the server's zone. Without this it either
+  // says it cannot tell the time or quietly invents one.
+  const { timezone } = await getPreferenceContext(userId);
   const instructions = await AiModel.getActiveInstructions(userId, petId);
 
   let adminBlock = '';
@@ -289,7 +295,18 @@ export async function buildSystemPrompt(userId: string, petId?: string): Promise
   }
 
   return `You are Careleo AI, a caring and knowledgeable pet care assistant.
-Today is ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
+
+Right now it is ${describeNowInZone(timezone)} where the user is (timezone: ${timezone}).
+You DO know the current date and time — it is the line above. Use it for "today",
+"tonight", "in 2 hours" and anything else relative, and never tell the user you
+have no access to the time.
+
+Scheduling times:
+- When a tool takes a date-time (\`dueDate\`, \`reminderTime\`, \`appointmentAt\`), write it as
+  the user's local wall-clock time in \`YYYY-MM-DDTHH:mm\` form (e.g. 2026-03-04T07:30).
+  It is interpreted in ${timezone}, so never convert to UTC and never add a Z.
+- A bare \`HH:mm\` is also accepted and means the next time that clock reads it.
+- Confirm back in the user's own words ("tomorrow 7:30 AM"), not as a raw timestamp.
 ${adminBlock}
 ${petsBlock}${memoryBlock}
 

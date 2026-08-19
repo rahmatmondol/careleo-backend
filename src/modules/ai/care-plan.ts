@@ -4,6 +4,8 @@ import { RemindersService } from '../reminders/service';
 import { PetProfileModel } from '@/modules/pet-profile/model';
 import { getModelForPurpose, recordTokenUsage } from './model-registry';
 import { generateText } from './generate';
+import { getPreferenceContext } from '@/modules/notifications/preferences';
+import { dayKeyPlusDays, nextZonedSlot } from '@/shared/types/timezone';
 
 // ─── Care plan types ──────────────────────────────────────────────────────
 
@@ -116,17 +118,6 @@ Make everything specific to this pet's breed, weight, and health conditions.
 Return ONLY valid JSON. No markdown, no extra text.`;
 }
 
-/** Today at HH:MM, or tomorrow when that time has already passed. */
-function nextSlotFor(time: string | undefined, now = new Date()): Date {
-  const [hours, minutes] = String(time ?? '08:00').split(':').map((n) => Number(n));
-  const due = new Date(now);
-  due.setHours(Number.isFinite(hours) ? hours : 8, Number.isFinite(minutes) ? minutes : 0, 0, 0);
-  // Accepting a plan at 9pm shouldn't fire three "overdue" pushes immediately.
-  if (due.getTime() <= now.getTime()) due.setDate(due.getDate() + 1);
-  return due;
-}
-
-const pad = (n: number) => String(n).padStart(2, '0');
 
 export const CarePlanService = {
   /**
@@ -189,6 +180,14 @@ export const CarePlanService = {
     const schedule = plan.daily_schedule ?? [];
     const vaccines = plan.upcoming_vaccines ?? [];
 
+    // A plan's times are wall-clock times on the *owner's* clock ("07:00
+    // feeding"), so they have to be resolved in the owner's zone. They used to
+    // be built from the server's, which is an accident of deployment: on a UTC
+    // host a 07:00 feeding became 13:00 for an owner in Dhaka, and the "that
+    // time already passed, use tomorrow" decision was made on the wrong clock
+    // as well.
+    const { timezone } = await getPreferenceContext(userId);
+
     let tasksCreated = 0;
     for (const item of schedule) {
       try {
@@ -197,7 +196,7 @@ export const CarePlanService = {
           title: item.task,
           taskType: item.taskType ?? 'OTHER',
           frequency: item.frequency ?? 'daily',
-          dueDate: nextSlotFor(item.time).toISOString(),
+          dueDate: nextZonedSlot(timezone, item.time).toISOString(),
           notes: [item.notes, item.amount, item.duration].filter(Boolean).join(' | '),
         });
         tasksCreated++;
@@ -210,15 +209,14 @@ export const CarePlanService = {
     for (const vax of vaccines) {
       if (vax.due_in_days == null || vax.due_in_days > 60) continue;
       try {
-        const reminderDate = new Date();
-        reminderDate.setDate(reminderDate.getDate() + vax.due_in_days);
         await RemindersService.create(userId, {
           petId,
           title: `${pet.name} — ${vax.vaccine} vaccine due`,
           reminderType: 'health',
           // The reminder scheduler expects a plain date + HH:MM, not an ISO
-          // timestamp — an ISO string here silently never fired.
-          reminderDate: `${reminderDate.getFullYear()}-${pad(reminderDate.getMonth() + 1)}-${pad(reminderDate.getDate())}`,
+          // timestamp — an ISO string here silently never fired. The date is
+          // counted on the owner's calendar, not the server's.
+          reminderDate: dayKeyPlusDays(timezone, vax.due_in_days),
           reminderTime: '09:00',
           frequency: 'once',
           notes: `Upcoming vaccine: ${vax.vaccine}`,

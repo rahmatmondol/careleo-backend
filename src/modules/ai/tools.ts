@@ -26,6 +26,8 @@ import {
 } from '@/modules/shop/services/customer/order.service';
 import type { FeatureKey } from '@/modules/subscriptions/catalog';
 import { listFreelancers, sendJobLetter, autoHireFreelancer } from '@/modules/freelancer/freelancer-client';
+import { getPreferenceContext } from '@/modules/notifications/preferences';
+import { dayKeyInZone, minutesInZone, nextZonedSlot, parseClockTime, zonedTimeToUtc } from '@/shared/types/timezone';
 
 // ─── Gemini Function Declarations ─────────────────────────────────────────
 // These are passed to the model so it knows what tools it can call.
@@ -41,7 +43,7 @@ export const AI_TOOL_DECLARATIONS = [
         petId:     { type: 'string', description: 'The pet ID to create the task for' },
         title:     { type: 'string', description: 'Task title e.g. "Buddy morning walk"' },
         taskType:  { type: 'string', description: 'One of: FEEDING, EXERCISE, MEDICINE, GROOMING, VET_VISIT, OTHER' },
-        dueDate:   { type: 'string', description: 'ISO date-time string for when the task is due' },
+        dueDate:   { type: 'string', description: "When the task is due, as the user's local wall-clock time: 'YYYY-MM-DDTHH:mm', or 'HH:mm' for the next time that clock reads it. Never UTC, never a trailing Z." },
         frequency: { type: 'string', description: 'One of: daily, weekly, monthly, none' },
         notes:     { type: 'string', description: 'Optional notes or instructions' },
       },
@@ -79,7 +81,7 @@ export const AI_TOOL_DECLARATIONS = [
       properties: {
         petId:        { type: 'string', description: 'The pet ID' },
         title:        { type: 'string', description: 'Reminder title' },
-        reminderTime: { type: 'string', description: 'ISO date-time for the reminder' },
+        reminderTime: { type: 'string', description: "When to remind, as the user's local wall-clock time: 'YYYY-MM-DDTHH:mm', or 'HH:mm' for the next time that clock reads it. Never UTC, never a trailing Z." },
         frequency:    { type: 'string', description: 'One of: Everyday, Weekly, Monthly, Once' },
         notes:        { type: 'string', description: 'Optional notes' },
       },
@@ -306,7 +308,7 @@ export const AI_TOOL_DECLARATIONS = [
         vetId: { type: 'string', description: 'The vet ID' },
         petId: { type: 'string', description: 'The pet ID' },
         type: { type: 'string', description: "'video' or 'visit'" },
-        appointmentAt: { type: 'string', description: 'ISO date-time of the appointment' },
+        appointmentAt: { type: 'string', description: "Appointment time as the user's local wall clock: 'YYYY-MM-DDTHH:mm'. Never UTC, never a trailing Z." },
         reason: { type: 'string', description: 'Reason for the visit' },
       },
       required: ['vetId', 'petId', 'appointmentAt'],
@@ -424,6 +426,43 @@ const TOOL_REQUIRED_FEATURE: Partial<Record<string, FeatureKey>> = {
   auto_hire_freelancer: 'auto_hire',
 };
 
+// ─── Time handling ─────────────────────────────────────────────────────────
+
+/**
+ * A date-time written by the model → the instant it means.
+ *
+ * The system prompt asks for the user's own wall-clock time (`2026-03-04T07:30`
+ * or a bare `07:30`), because that is the only thing the user actually said —
+ * asking a model to do UTC arithmetic just moves the mistake. So an unzoned
+ * value is read on the user's clock instead of the server's, which is what
+ * `new Date(...)` would have done. An explicit offset or `Z` is respected: it
+ * is unambiguous, whoever produced it.
+ */
+const resolveWallClock = (value: unknown, timeZone: string, now: Date = new Date()): Date | null => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return null;
+
+  const timeOnly = parseClockTime(raw);
+  if (timeOnly !== null) return nextZonedSlot(timeZone, raw, now);
+
+  const local = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2}))?(?::\d{2}(?:\.\d+)?)?$/);
+  if (local) {
+    const [, y, mo, d, hh, mm] = local;
+    // A date with no time of day means "that morning", not midnight — a task
+    // due at 00:00 reads as overdue for the whole day it belongs to.
+    return zonedTimeToUtc(timeZone, Number(y), Number(mo), Number(d), hh ? Number(hh) : 9, mm ? Number(mm) : 0);
+  }
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+/** `HH:mm` on the user's clock for an instant — the shape reminders store. */
+const hhMmInZone = (timeZone: string, at: Date): string => {
+  const minutes = minutesInZone(timeZone, at);
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+};
+
 // ─── Tool Executor ─────────────────────────────────────────────────────────
 // Called with the function name + args from Gemini's response.
 
@@ -434,6 +473,10 @@ export async function executeTool(
   authToken?: string,
 ): Promise<string> {
   try {
+    // Every time a tool carries is a time on the user's clock, so the zone is
+    // resolved once per call (cached for 15s) rather than per date field.
+    const { timezone } = await getPreferenceContext(userId);
+
     // Tier gate: block tools whose feature is not on the user's plan.
     const requiredFeature = TOOL_REQUIRED_FEATURE[toolName];
     if (requiredFeature && !(await can(userId, requiredFeature))) {
@@ -454,7 +497,7 @@ export async function executeTool(
           petId: args.petId,
           title: args.title,
           taskType: args.taskType ?? 'OTHER',
-          dueDate: args.dueDate ?? new Date().toISOString(),
+          dueDate: (resolveWallClock(args.dueDate, timezone) ?? new Date()).toISOString(),
           frequency: args.frequency ?? 'none',
           notes: args.notes,
         });
@@ -483,10 +526,15 @@ export async function executeTool(
 
       // ── Reminder tools ────────────────────────────────────────────────
       case 'set_reminder': {
+        // Reminders are stored as a calendar date + `HH:mm`, and the scheduler
+        // silently refuses anything else — an ISO timestamp passed straight
+        // through here produced a reminder row that never fired.
+        const at = resolveWallClock(args.reminderTime, timezone) ?? new Date();
         const result = await RemindersService.create(userId, {
           petId: args.petId,
           title: args.title,
-          reminderTime: args.reminderTime,
+          reminderDate: dayKeyInZone(timezone, at),
+          reminderTime: hhMmInZone(timezone, at),
           frequency: args.frequency ?? 'Once',
           notes: args.notes,
         });
@@ -772,8 +820,9 @@ export async function executeTool(
 
       case 'book_vet_appointment': {
         const type = args.type === 'video' ? 'video' : 'visit';
+        const appointmentAt = resolveWallClock(args.appointmentAt, timezone);
         const { appointment } = await VetsService.bookAppointment(userId, args.vetId, type, {
-          appointmentAt: args.appointmentAt,
+          appointmentAt: appointmentAt ? appointmentAt.toISOString() : args.appointmentAt,
           petId: args.petId,
           reason: args.reason,
         });
@@ -784,7 +833,10 @@ export async function executeTool(
               title: `Vet appointment${args.reason ? ` — ${args.reason}` : ''}`,
               reminderType: 'vet_appointment',
               frequency: 'Once',
-              reminderDate: args.appointmentAt,
+              // Date *and* time: a date alone leaves the scheduler with no
+              // `HH:mm`, and it drops the reminder rather than guessing.
+              reminderDate: dayKeyInZone(timezone, appointmentAt ?? new Date()),
+              reminderTime: hhMmInZone(timezone, appointmentAt ?? new Date()),
               notes: 'Upcoming vet appointment.',
             });
           } catch { /* reminder is convenience */ }

@@ -20,6 +20,7 @@ import { CaregiversModel } from '@/modules/caregivers/model';
 import { NotificationsService, type PushPayload } from '@/modules/notifications/service';
 import { deliverToUser } from '@/modules/notifications/deliver';
 import { getPreferenceContext, priorityForTaskType, type NotificationPriority } from '@/modules/notifications/preferences';
+import { dayKeyInZone, splitDayKey, zonedTimeToUtc } from '@/shared/types/timezone';
 
 const redisUrl = String(process.env.REDIS_URL ?? '').trim() || 'redis://localhost:6379';
 const parsed = new URL(redisUrl);
@@ -535,28 +536,40 @@ const parseTimeToMinutes = (input: string): number | null => {
   return null;
 };
 
-const parseDateOnly = (input: string): Date | null => {
-  const raw = input.trim();
-  if (!raw) return null;
-  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+/**
+ * `YYYY-MM-DD` → `[year, month (1-based), day]`.
+ *
+ * Deliberately not a `Date`: a reminder date is a day on the *user's*
+ * calendar, and turning it into an instant before the time of day is known
+ * pins it to whatever zone the server happens to run in.
+ */
+const parseDateOnly = (input: string): [number, number, number] | null => {
+  const m = input.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
   const y = Number(m[1]);
-  const mo = Number(m[2]) - 1;
+  const mo = Number(m[2]);
   const d = Number(m[3]);
-  const date = new Date(y, mo, d);
-  if (Number.isNaN(date.getTime())) return null;
-  if (date.getFullYear() !== y || date.getMonth() !== mo || date.getDate() !== d) return null;
-  return date;
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null;
+  return [y, mo, d];
 };
 
 const getFrequency = (value: unknown): string => String(value ?? '').trim().toLowerCase();
 
+/**
+ * When this reminder should next fire.
+ *
+ * `reminderTime` is a wall-clock time the user typed ("07:30"), so it only
+ * means anything against their own clock — resolving it with the server's
+ * turned a morning reminder into a middle-of-the-night one for anybody not
+ * living in the deployment's timezone.
+ */
 const nextReminderOccurrence = (reminder: {
   reminderTime?: string | null;
   frequency?: string | null;
   reminderDate?: string | null;
   createdAt?: Date | null;
-}, now: Date): Date | null => {
+}, now: Date, timeZone: string): Date | null => {
   const timeMin = parseTimeToMinutes(String(reminder.reminderTime ?? '').trim());
   if (timeMin === null) return null;
   const hour = Math.floor(timeMin / 60);
@@ -566,30 +579,31 @@ const nextReminderOccurrence = (reminder: {
   const dateOnly = reminder.reminderDate ? parseDateOnly(String(reminder.reminderDate)) : null;
   const createdAt = reminder.createdAt ? new Date(reminder.createdAt) : null;
 
-  const todayAt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
-  const tomorrowAt = new Date(todayAt.getTime() + 24 * 60 * 60_000);
+  /** The reminder's time of day on the given calendar date, as an instant. */
+  const at = (y: number, m: number, d: number) => zonedTimeToUtc(timeZone, y, m, d, hour, minute);
+  const dowOf = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+
+  const [ty, tm, td] = splitDayKey(dayKeyInZone(timeZone, now));
+  const todayAt = at(ty, tm, td);
+  const tomorrowAt = at(ty, tm, td + 1);
 
   if (freq.includes('once') || freq.includes('one')) {
-    if (dateOnly) return new Date(dateOnly.getFullYear(), dateOnly.getMonth(), dateOnly.getDate(), hour, minute, 0, 0);
+    if (dateOnly) return at(dateOnly[0], dateOnly[1], dateOnly[2]);
     return todayAt > now ? todayAt : tomorrowAt;
   }
 
   if (freq.includes('weekly')) {
-    const base = dateOnly ?? createdAt ?? now;
-    const targetDow = base.getDay();
-    const out = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
-    const delta = (targetDow - out.getDay() + 7) % 7;
-    if (delta !== 0) out.setDate(out.getDate() + delta);
-    if (out <= now) out.setDate(out.getDate() + 7);
-    return out;
+    const base = dateOnly ?? splitDayKey(dayKeyInZone(timeZone, createdAt ?? now));
+    const delta = (dowOf(base[0], base[1], base[2]) - dowOf(ty, tm, td) + 7) % 7;
+    const out = at(ty, tm, td + delta);
+    return out > now ? out : at(ty, tm, td + delta + 7);
   }
 
   if (freq.includes('monthly')) {
-    const base = dateOnly ?? createdAt ?? now;
-    const targetDom = base.getDate();
-    let out = new Date(now.getFullYear(), now.getMonth(), targetDom, hour, minute, 0, 0);
-    if (out <= now) out = new Date(now.getFullYear(), now.getMonth() + 1, targetDom, hour, minute, 0, 0);
-    return out;
+    const base = dateOnly ?? splitDayKey(dayKeyInZone(timeZone, createdAt ?? now));
+    const targetDom = base[2];
+    const out = at(ty, tm, targetDom);
+    return out > now ? out : at(ty, tm + 1, targetDom);
   }
 
   return todayAt > now ? todayAt : tomorrowAt;
@@ -620,7 +634,8 @@ export const scheduleReminderDuePush = async (reminderId: string) => {
     return;
   }
 
-  const nextAt = nextReminderOccurrence(reminder, new Date());
+  const { timezone } = await getPreferenceContext(String(reminder.userId));
+  const nextAt = nextReminderOccurrence(reminder, new Date(), timezone);
   if (!nextAt) return;
 
   await upsertJob(
