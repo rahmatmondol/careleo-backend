@@ -605,8 +605,10 @@ export const AdminAiService = {
   },
 
   async getModelDailyStats(modelId: string, days = 7) {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const from = new Date();
+    from.setDate(from.getDate() - days);
+    // statDate is a DATE column, so compare against a plain YYYY-MM-DD.
+    const since = from.toISOString().slice(0, 10);
 
     return db
       .select()

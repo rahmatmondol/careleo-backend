@@ -1,11 +1,13 @@
 import {
   boolean,
+  date,
   index,
   integer,
   numeric,
   pgTable,
   text,
   timestamp,
+  unique,
   uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
@@ -193,9 +195,16 @@ export const aiModelConfigs = pgTable('ai_model_configs', {
 /**
  * Per-user token limits — admin can set daily/monthly caps or hard block.
  */
+/**
+ * One row per user. `userId` is unique because `recordTokenUsage` upserts on it
+ * — without the constraint every ON CONFLICT raised "no unique or exclusion
+ * constraint matching the ON CONFLICT specification", the write was swallowed
+ * by its own catch, and the counters stayed at zero. `checkUserTokenLimit`
+ * reads those counters, so per-user AI token limits never actually applied.
+ */
 export const userAiTokenLimits = pgTable('user_ai_token_limits', {
   id: uuid('id').defaultRandom().primaryKey(),
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull().unique().references(() => users.id, { onDelete: 'cascade' }),
   dailyLimit: integer('daily_limit'),
   monthlyLimit: integer('monthly_limit'),
   isBlocked: boolean('is_blocked').default(false),
@@ -211,13 +220,20 @@ export const userAiTokenLimits = pgTable('user_ai_token_limits', {
 
 /**
  * Daily stats per model config — for admin usage charts.
+ *
+ * `(modelConfigId, statDate)` is unique for the same reason as above: the
+ * upsert targets it. `statDate` is a DATE, not a timestamp — it was a
+ * timestamptz being written with `CURRENT_DATE`, so "one row per model per day"
+ * depended on the server's timezone rendering midnight identically every time.
  */
 export const aiModelDailyStats = pgTable('ai_model_daily_stats', {
   id: uuid('id').defaultRandom().primaryKey(),
   modelConfigId: uuid('model_config_id').notNull().references(() => aiModelConfigs.id, { onDelete: 'cascade' }),
-  statDate: timestamp('stat_date', { withTimezone: true }).notNull().defaultNow(),
+  statDate: date('stat_date').notNull().defaultNow(),
   totalCalls: integer('total_calls').default(0),
   totalTokens: integer('total_tokens').default(0),
   totalCostUsd: numeric('total_cost_usd', { precision: 10, scale: 6 }).default('0'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  unique('uq_ai_model_daily_stats_model_date').on(table.modelConfigId, table.statDate),
+]);
