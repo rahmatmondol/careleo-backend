@@ -15,7 +15,7 @@ import { FoodInventoryService } from '@/modules/food-inventory/service';
 import { VetsService } from '@/modules/vets/service';
 import { VetsModel } from '@/modules/vets/model';
 import { VaccinationsService } from '@/modules/vaccinations/service';
-import { assessSymptoms } from './symptom-assessment';
+import { assessSymptoms, listSymptomReports, recordOwnerUpdate } from './symptom-assessment';
 import { PetsService } from '@/modules/pets/service';
 import { CURRENCY_CODE, formatMoney } from '@/shared/types/currency';
 import { can, resolveEntitlement } from '@/modules/subscriptions/entitlements';
@@ -271,6 +271,31 @@ export const AI_TOOL_DECLARATIONS = [
         symptoms: { type: 'array', items: { type: 'string' }, description: 'List of symptoms described by the user' },
       },
       required: ['symptoms'],
+    },
+  },
+  {
+    name: 'get_symptom_history',
+    description: "Look up this pet's past symptom assessments — what was reported, how urgent it was, what the owner said afterwards, and whether it was resolved. Use when the owner refers to something that happened before ('the limp again', 'is this the same as last time'), or when you need to know whether an episode is still open.",
+    parameters: {
+      type: 'object',
+      properties: {
+        petId: { type: 'string', description: 'The pet ID' },
+        limit: { type: 'number', description: 'How many past reports to return (default 5)' },
+      },
+      required: ['petId'],
+    },
+  },
+  {
+    name: 'update_symptom_report',
+    description: "Record what the owner says about how a pet is doing since a symptom assessment, and close the episode when they say it cleared up. Call this whenever the owner answers a 'how is he doing now' question or mentions an earlier problem is better, worse or the same. Report ids come from get_symptom_history or from the open-episodes list in your context.",
+    parameters: {
+      type: 'object',
+      properties: {
+        reportId: { type: 'string', description: 'The symptom report id' },
+        update: { type: 'string', description: "The owner's own words about how the pet is doing now" },
+        resolved: { type: 'boolean', description: 'True only when the owner says it has cleared up or a vet has dealt with it' },
+      },
+      required: ['reportId', 'update'],
     },
   },
   {
@@ -789,6 +814,42 @@ export async function executeTool(
       case 'detect_symptoms': {
         const assessment = await assessSymptoms(userId, args.petId, args.symptoms ?? []);
         return JSON.stringify({ success: true, ...assessment });
+      }
+
+      case 'get_symptom_history': {
+        const { reports } = await listSymptomReports(userId, {
+          petId: args.petId,
+          limit: Math.min(Number(args.limit) || 5, 20),
+        });
+        return JSON.stringify({
+          success: true,
+          reports: reports.map((r) => ({
+            reportId: r.id,
+            reportedAt: r.createdAt,
+            symptoms: r.symptoms,
+            urgency: r.urgency,
+            concern: r.concern,
+            advice: r.advice,
+            shouldSeeVet: r.shouldSeeVet,
+            seenInPhoto: r.observations,
+            ownerUpdate: r.ownerUpdate,
+            resolved: !!r.resolvedAt,
+          })),
+        });
+      }
+
+      case 'update_symptom_report': {
+        const result = await recordOwnerUpdate(
+          userId,
+          String(args.reportId ?? ''),
+          String(args.update ?? ''),
+          args.resolved === true,
+        );
+        if (!result.ok) return JSON.stringify({ success: false, error: 'Symptom report not found' });
+        return JSON.stringify({
+          success: true,
+          message: result.resolved ? 'Update saved and the episode is now closed.' : 'Update saved.',
+        });
       }
 
       case 'find_nearby_vets': {

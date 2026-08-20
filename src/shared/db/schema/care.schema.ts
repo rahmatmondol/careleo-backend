@@ -69,11 +69,39 @@ export const symptomReports = pgTable(
     concern: text('concern'),
     advice: text('advice'),
     shouldSeeVet: boolean('should_see_vet').notNull().default(false),
+    /**
+     * The rest of what the owner actually saw and was told. Only the three
+     * columns above were kept, so the history screen could not show a report
+     * back the way it was given, and a chat opened from a report had nothing
+     * but a one-line concern to work from.
+     */
+    /** What the vision model described in the attached photo. JSON string[]. */
+    observationsJson: text('observations_json'),
+    /** Answers to the generated follow-up questions. JSON {q,a}[]. */
+    answersJson: text('answers_json'),
+    /** Why this pet's breed, age or history mattered. */
+    breedNote: text('breed_note'),
+    /** Prose from the web-grounded research pass. */
+    research: text('research'),
+    /** Pages that research cited. JSON {title,uri}[]. */
+    sourcesJson: text('sources_json'),
+    /** 'ai' | 'critical-sign' | 'offline' — how this report was produced. */
+    source: varchar('source', { length: 20 }).notNull().default('ai'),
+    /** Chat opened from this report, if the owner asked CareLeo about it. */
+    chatSessionId: uuid('chat_session_id'),
     /** When to ask how the pet is doing. Null = no follow-up wanted. */
     followUpAt: timestamp('follow_up_at', { withTimezone: true }),
     followedUpAt: timestamp('followed_up_at', { withTimezone: true }),
     /** Set once the owner tells us it cleared up, or a vet visit happened. */
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    /**
+     * What the owner said when asked how the pet is doing. The follow-up job
+     * asks the question; without somewhere to put the answer the loop stayed
+     * half-open — the assistant re-read the original symptoms every time and
+     * never knew whether anything had changed since.
+     */
+    ownerUpdate: text('owner_update'),
+    ownerUpdateAt: timestamp('owner_update_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

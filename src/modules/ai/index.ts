@@ -1,8 +1,14 @@
 import { Elysia } from 'elysia';
 import { requireAuth } from '@/shared/auth/guards';
+import { NotFoundError } from '@/shared/errors';
 import { ValidationError } from '@/shared/errors';
 import { AiService } from './service';
-import { assessSymptoms } from './symptom-assessment';
+import {
+  assessSymptoms,
+  generateSymptomQuestions,
+  getSymptomReport,
+  listSymptomReports,
+} from './symptom-assessment';
 
 export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (app) =>
   app
@@ -54,6 +60,56 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
         console.error('[vision/analyze-pet-image] error:', err?.message ?? err);
         // These used to return HTTP 200 with `success: false`, which the app
         // read as "no pet in this photo" instead of as a failure.
+        return fail(500, err?.message ?? 'Vision analysis failed');
+      }
+    })
+
+    // ─── Vision: Describe a symptom photo ──────────────────────────────
+    /**
+     * Optional photo step of the symptom checker. Returns what is visibly
+     * present — never a diagnosis — so the owner can confirm it and the text
+     * assessment gets better input. An empty `observations` list is a normal,
+     * correct answer, not a failure.
+     */
+    .post('/vision/analyze-symptom-image', async (ctx: any) => {
+      const { body, request, headers, jwt } = ctx;
+      const fail = (status: number, error: string) =>
+        new Response(JSON.stringify({ success: false, data: null, error }), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+      try {
+        const user = await requireAuth(headers, jwt);
+
+        let file = (body?.image ?? body?.file) as File | null;
+        if (!file && typeof request?.formData === 'function') {
+          try {
+            const formData = await request.formData();
+            file = formData.get('image') as File | null;
+          } catch {
+            // Body already consumed by the parser and no file on it.
+          }
+        }
+
+        if (!file || typeof file.arrayBuffer !== 'function') {
+          return fail(400, 'image file is required');
+        }
+
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+        if (!allowedTypes.includes(file.type)) {
+          return fail(415, `Invalid file type: ${file.type || 'unknown'}. Use JPG, PNG, or WebP`);
+        }
+        if (file.size > 10 * 1024 * 1024) {
+          return fail(413, 'File too large. Max 10MB');
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+        const base64 = Buffer.from(arrayBuffer).toString('base64');
+        const result = await AiService.observeSymptomImage(user.id, base64, file.type);
+        return { success: true, data: result, error: null };
+      } catch (err: any) {
+        console.error('[vision/analyze-symptom-image] error:', err?.message ?? err);
         return fail(500, err?.message ?? 'Vision analysis failed');
       }
     })
@@ -279,15 +335,103 @@ export const aiController = new Elysia({ name: 'ai-controller' }).group('/ai', (
       const { body, headers, jwt } = ctx;
       try {
         const user = await requireAuth(headers, jwt);
-        const { symptoms, petId } = body as { symptoms: string[]; petId?: string };
+        const { symptoms, petId, observations, answers, source } = body as {
+          symptoms: string[];
+          petId?: string;
+          observations?: string[];
+          answers?: { question: string; answer: string }[];
+          source?: 'ai' | 'critical-sign' | 'offline';
+        };
         if (!symptoms || !Array.isArray(symptoms) || symptoms.length === 0) {
           return { success: false, error: 'symptoms array is required', data: null };
         }
-        const assessment = await assessSymptoms(user.id, petId, symptoms);
+        const assessment = await assessSymptoms(
+          user.id,
+          petId,
+          symptoms,
+          Array.isArray(observations) ? observations.map(String).filter(Boolean).slice(0, 6) : [],
+          Array.isArray(answers)
+            ? answers
+                .filter((a) => a?.question && a?.answer)
+                .map((a) => ({ question: String(a.question), answer: String(a.answer) }))
+                .slice(0, 8)
+            : [],
+          source === 'critical-sign' || source === 'offline' ? source : 'ai',
+        );
         return { success: true, data: assessment, error: null };
       } catch (err: any) {
         return new Response(
           JSON.stringify({ success: false, data: null, error: err?.message ?? 'Assessment failed' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+    })
+
+    // ─── Symptom report history ────────────────────────────────────────
+    /**
+     * Past assessments for the signed-in owner, newest first. Every triage has
+     * always been written to `symptom_reports` — this is the first thing that
+     * reads them back, so an owner can see what they reported last week and the
+     * follow-up notification has somewhere to land.
+     */
+    .get('/symptom-reports', async (ctx: any) => {
+      const { headers, jwt, query } = ctx;
+      const user = await requireAuth(headers, jwt);
+      const result = await listSymptomReports(user.id, {
+        petId: query?.petId ? String(query.petId) : undefined,
+        limit: query?.limit ? Number(query.limit) : undefined,
+      });
+      return { success: true, data: result, error: null };
+    })
+
+    .get('/symptom-reports/:id', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const user = await requireAuth(headers, jwt);
+      const report = await getSymptomReport(user.id, String(params.id));
+      if (!report) throw new NotFoundError('Symptom report not found');
+      return { success: true, data: { report }, error: null };
+    })
+
+    /**
+     * Open a chat about a report. Returns an existing session if one was
+     * already started for it, so the owner keeps one thread per episode.
+     */
+    .post('/symptom-reports/:id/chat', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const user = await requireAuth(headers, jwt);
+      const result = await AiService.startChatFromSymptomReport(user.id, String(params.id));
+      return { success: true, data: result, error: null };
+    })
+
+    // ─── Symptom follow-up questions ───────────────────────────────────
+    /**
+     * Questions targeted at what the owner actually reported, replacing a fixed
+     * list that asked every owner the same thing. Always answers with a usable
+     * set — a generic fallback rather than an error — because the flow cannot
+     * dead-end on a failed generation.
+     */
+    .post('/symptom-questions', async (ctx: any) => {
+      const { body, headers, jwt } = ctx;
+      try {
+        const user = await requireAuth(headers, jwt);
+        const { symptoms, petId, observations } = body as {
+          symptoms: string[];
+          petId?: string;
+          observations?: string[];
+        };
+        if (!symptoms || !Array.isArray(symptoms) || symptoms.length === 0) {
+          return { success: false, error: 'symptoms array is required', data: null };
+        }
+        const result = await generateSymptomQuestions(
+          user.id,
+          petId,
+          symptoms,
+          Array.isArray(observations) ? observations.map(String).filter(Boolean).slice(0, 6) : [],
+        );
+        return { success: true, data: result, error: null };
+      } catch (err: any) {
+        return new Response(
+          JSON.stringify({ success: false, data: null, error: err?.message ?? 'Question generation failed' }),
           { status: 500, headers: { 'Content-Type': 'application/json' } },
         );
       }

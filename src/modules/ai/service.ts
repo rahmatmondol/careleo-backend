@@ -2,10 +2,14 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { AiModel } from './model';
-import { analyzePetImage, type PetVisionResult } from './vision';
+import { analyzePetImage, observeSymptomsInImage, type PetVisionResult, type SymptomVisionResult } from './vision';
 import { CarePlanService, type CarePlan } from './care-plan';
 import { AI_TOOL_DECLARATIONS, executeTool } from './tools';
-import { ValidationError } from '@/shared/errors';
+import { NotFoundError, ValidationError } from '@/shared/errors';
+import { eq } from 'drizzle-orm';
+import { db } from '@/shared/db';
+import { aiChatSessions, symptomReports } from '@/shared/db/schema';
+import { buildOpenSymptomBlock, formatReportForChat, getSymptomReport } from './symptom-assessment';
 import { PetProfileModel } from '@/modules/pet-profile/model';
 import { PetProfileService } from '@/modules/pet-profile/service';
 import {
@@ -237,6 +241,39 @@ async function findKnownDietBrand(userId: string, excludePetId?: string): Promis
 }
 
 // ─── Context builder for chat system prompt ───────────────────────────────
+/**
+ * Append a session's stored context snapshot to the system prompt.
+ *
+ * Returns the prompt unchanged when there is no snapshot or it does not parse,
+ * so a malformed row can never break a chat.
+ */
+function buildContextSnapshotBlock(snapshotJson: string | null | undefined, prompt: string): string {
+  if (!snapshotJson) return prompt;
+  try {
+    const snapshot = JSON.parse(snapshotJson);
+    if (snapshot?.kind !== 'symptom_report') return prompt;
+
+    const lines = [
+      `Pet: ${snapshot.petName ?? 'unknown'}`,
+      `Assessed: ${snapshot.assessedAt ?? 'recently'}`,
+      `Urgency: ${snapshot.urgency}`,
+      `Reported symptoms: ${snapshot.symptoms}`,
+      snapshot.concern ? `Possible concern: ${snapshot.concern}` : null,
+      snapshot.advice ? `Advice given: ${snapshot.advice}` : null,
+      snapshot.breedNote ? `Breed/history note: ${snapshot.breedNote}` : null,
+      snapshot.observations?.length ? `Seen in the owner's photo: ${snapshot.observations.join('; ')}` : null,
+      snapshot.answers?.length
+        ? `Follow-up answers: ${snapshot.answers.map((a: any) => `${a.question} — ${a.answer}`).join(' | ')}`
+        : null,
+      snapshot.shouldSeeVet ? 'A vet visit was advised.' : null,
+    ].filter(Boolean);
+
+    return `${prompt}\n\n[THIS CHAT IS ABOUT A SYMPTOM ASSESSMENT]\n${lines.join('\n')}\nAnswer in the context of this episode. It is guidance, not a diagnosis.\n[END SYMPTOM ASSESSMENT]`;
+  } catch {
+    return prompt;
+  }
+}
+
 export async function buildSystemPrompt(userId: string, petId?: string): Promise<string> {
   const allPets = await AiModel.getUserPets(userId);
   // The assistant schedules things, so it needs the clock the user is looking
@@ -294,6 +331,11 @@ export async function buildSystemPrompt(userId: string, petId?: string): Promise
     }
   }
 
+  // Symptom episodes that are still open for this pet, so a chat that was not
+  // started from a report still knows the pet was assessed recently and can
+  // ask how it is going.
+  const openSymptomBlock = await buildOpenSymptomBlock(petId);
+
   return `You are Careleo AI, a caring and knowledgeable pet care assistant.
 
 Right now it is ${describeNowInZone(timezone)} where the user is (timezone: ${timezone}).
@@ -308,7 +350,7 @@ Scheduling times:
 - A bare \`HH:mm\` is also accepted and means the next time that clock reads it.
 - Confirm back in the user's own words ("tomorrow 7:30 AM"), not as a raw timestamp.
 ${adminBlock}
-${petsBlock}${memoryBlock}
+${petsBlock}${memoryBlock}${openSymptomBlock}
 
 Your personality:
 - Warm, friendly, like a knowledgeable friend — not a cold assistant
@@ -324,6 +366,9 @@ Health & vet handling:
 - If a vet visit is advised, use find_nearby_vets, then get_vet_availability, then book_vet_appointment (confirm details first).
 - After a vet visit, capture what happened with save_medical_record, and set reminders for any medication or follow-up.
 - Record vaccinations with add_vaccination (a due date sets a reminder).
+- Any open symptom episodes for the active pet are listed in your context above. When one is open and the conversation gives you an opening, ask how the pet is doing now — by name, referring to what was actually reported.
+- When the owner tells you how a pet is doing since an assessment ("he's eating again", "still limping", "worse today"), call update_symptom_report with their own words, and set resolved only when they say it has cleared up.
+- Use get_symptom_history when the owner refers back to something earlier ("the limp again", "same as last time") or when you need an episode's id.
 
 Money:
 - Every amount on this platform is in ${CURRENCY_CODE} and is written ${CURRENCY_SYMBOL}. Tools return ready-made \`*_display\` strings — quote them as they are.
@@ -351,6 +396,30 @@ export const AiService = {
 
     await recordTokenUsage({
       userId, model: visionModel, feature: 'vision',
+      inputTokens: 1000, outputTokens: 200,
+    });
+
+    return result;
+  },
+
+  /**
+   * Describe what a symptom photo shows. Feeds the symptom checker's optional
+   * photo step; the observations become extra input to the text assessment
+   * rather than an assessment of their own.
+   */
+  async observeSymptomImage(
+    userId: string,
+    imageBase64: string,
+    mimeType: string,
+  ): Promise<SymptomVisionResult> {
+    const limitCheck = await checkUserTokenLimit(userId);
+    if (!limitCheck.allowed) throw new ValidationError(limitCheck.reason ?? 'Token limit reached');
+
+    const visionModel = await getModelForPurpose('vision');
+    const result = await observeSymptomsInImage(imageBase64, mimeType, visionModel);
+
+    await recordTokenUsage({
+      userId, model: visionModel, feature: 'symptom_vision',
       inputTokens: 1000, outputTokens: 200,
     });
 
@@ -549,6 +618,64 @@ Return ONLY a JSON array of 3 strings.`;
     return { session };
   },
 
+  /**
+   * Open a chat about an existing symptom report.
+   *
+   * The report is attached two ways: as the session's opening assistant message
+   * so the owner sees what they are asking about, and on
+   * `contextSnapshotJson` so every later turn keeps the structured findings —
+   * the message alone would scroll out of the 20-message window.
+   *
+   * One chat per report: asking twice returns the existing session rather than
+   * starting a second thread about the same episode.
+   */
+  async startChatFromSymptomReport(userId: string, reportId: string) {
+    const report = await getSymptomReport(userId, reportId);
+    if (!report) throw new NotFoundError('Symptom report not found');
+
+    if (report.chatSessionId) {
+      const existing = await AiModel.getSession(userId, report.chatSessionId);
+      if (existing) return { session: existing, sessionId: existing.id, reused: true };
+    }
+
+    const title = `${report.petName ?? 'Pet'} — ${report.concern ?? report.symptoms}`.slice(0, 120);
+    const session = await AiModel.createSession(userId, report.petId ?? undefined, title);
+    if (!session) throw new ValidationError('Could not start a chat');
+
+    await db
+      .update(aiChatSessions)
+      .set({
+        contextSnapshotJson: JSON.stringify({
+          kind: 'symptom_report',
+          reportId: report.id,
+          petName: report.petName,
+          symptoms: report.symptoms,
+          urgency: report.urgency,
+          concern: report.concern,
+          advice: report.advice,
+          breedNote: report.breedNote,
+          observations: report.observations,
+          answers: report.answers,
+          shouldSeeVet: report.shouldSeeVet,
+          assessedAt: report.createdAt,
+        }),
+      })
+      .where(eq(aiChatSessions.id, session.id));
+
+    await AiModel.saveMessage({
+      sessionId: session.id,
+      role: 'assistant',
+      content: formatReportForChat(report),
+    });
+
+    await db
+      .update(symptomReports)
+      .set({ chatSessionId: session.id })
+      .where(eq(symptomReports.id, report.id));
+
+    return { session, sessionId: session.id, reused: false };
+  },
+
   async listSessions(userId: string) {
     const sessions = await AiModel.listSessions(userId);
     return { sessions };
@@ -600,9 +727,15 @@ Return ONLY a JSON array of 3 strings.`;
     const basePrompt = await buildSystemPrompt(userId, activePetId);
     // Earlier turns that no longer fit the window, carried forward so the
     // thread survives a long conversation.
-    const systemPrompt = summary
+    const withSummary = summary
       ? `${basePrompt}\n\n[EARLIER IN THIS CONVERSATION]\n${summary}\n[END EARLIER]`
       : basePrompt;
+
+    // A session started from a symptom report carries that report on the
+    // session itself. Injecting it every turn is what keeps the thread about
+    // the episode: the opening message scrolls out of the 20-message window,
+    // and once it does the model has no idea what "it" refers to.
+    const systemPrompt = buildContextSnapshotBlock((session as any).contextSnapshotJson, withSummary);
 
     // Prior turns, with each assistant message carrying a note of the tools it
     // ran so a follow-up question can refer back to those actions.
@@ -929,9 +1062,15 @@ Return ONLY a JSON array of 3 strings.`;
     const basePrompt = await buildSystemPrompt(userId, activePetId);
     // Earlier turns that no longer fit the window, carried forward so the
     // thread survives a long conversation.
-    const systemPrompt = summary
+    const withSummary = summary
       ? `${basePrompt}\n\n[EARLIER IN THIS CONVERSATION]\n${summary}\n[END EARLIER]`
       : basePrompt;
+
+    // A session started from a symptom report carries that report on the
+    // session itself. Injecting it every turn is what keeps the thread about
+    // the episode: the opening message scrolls out of the 20-message window,
+    // and once it does the model has no idea what "it" refers to.
+    const systemPrompt = buildContextSnapshotBlock((session as any).contextSnapshotJson, withSummary);
     const copy = fallbackCopy(userMessage);
 
     const priorTurns = recentHistory
