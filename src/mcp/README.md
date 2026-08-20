@@ -1,7 +1,7 @@
-# CareLeo shop MCP server
+# CareLeo MCP server
 
-Exposes the shop admin API — products, categories, brands, attributes — as MCP
-tools for Claude Desktop, Cursor, Antigravity or any other MCP client.
+Exposes CareLeo to Claude Desktop, Cursor, Antigravity or any other MCP client:
+the shop admin API, and the same assistant tools the in-app AI uses.
 
 ## Why it lives here
 
@@ -30,10 +30,13 @@ talks to the database, not to `:3000`.
 ```json
 {
   "mcpServers": {
-    "careleo-shop": {
+    "careleo": {
       "command": "bun",
       "args": ["run", "src/mcp/index.ts"],
-      "cwd": "/absolute/path/to/careleo-backend"
+      "cwd": "/absolute/path/to/careleo-backend",
+      "env": {
+        "CARELEO_MCP_USER_EMAIL": "you@example.com"
+      }
     }
   }
 }
@@ -44,7 +47,31 @@ talks to the database, not to `:3000`.
 
 Locally you can also just run `bun run mcp`.
 
-## Tools
+### Who the assistant tools act as
+
+`CARELEO_MCP_USER_EMAIL` (or `CARELEO_MCP_USER_ID`) names the account the
+assistant tools operate on. They read that user's pets, write their tasks, and
+are gated by that user's subscription — a tool their plan does not include comes
+back as an error saying so, exactly as it does in the app.
+
+It has no default. An MCP session has no signed-in user, and picking an owner by
+guessing would be worse than not offering the tools, so **without it the
+assistant tools are not registered at all** and only the shop tools appear.
+
+### Tools that are withheld by default
+
+Five tools spend money or reach a real person, and an MCP client drives them
+with nobody confirming the way the in-app assistant has somebody confirming:
+
+`place_reorder` · `book_vet_appointment` · `auto_hire_freelancer` ·
+`send_job_letter` · `send_notification`
+
+They are registered only with `CARELEO_MCP_ALLOW_WRITES=true`. Everything else
+— creating tasks and reminders, saving facts, medical records, vaccinations,
+inventory — is ordinary data entry and is available as soon as an operator is
+set.
+
+## Shop tools
 
 | Tool | Does |
 |------|------|
@@ -61,11 +88,22 @@ A service that answers `{ error, status }` — "Brand already exists", "Not
 found" — is returned to the model as a tool error rather than as a success
 payload with an `error` key inside it.
 
-## Extending it
+## Assistant tools
 
-`modules/ai/tools.ts` already declares ~25 tools over tasks, reminders, pets,
-vets, medical records, vaccinations, inventory and freelancers, dispatched by
-`executeTool`. Exposing that registry here would give an MCP client the same
-reach the in-app assistant has. It needs one decision first: `executeTool` is
-scoped to a `userId`, and an MCP session has no signed-in user, so whose data it
-operates on has to be settled deliberately.
+Every tool in `modules/ai/tools.ts` — 30 of them, over tasks, reminders, pets,
+symptom history, care plans, orders, vets, medical records, vaccinations, food
+inventory and freelancers — is registered from the same declarations the in-app
+assistant uses, so the two can never drift apart. The JSON Schema on each
+declaration is converted to the Zod shape the MCP SDK wants.
+
+`executeTool` reports failure inside its JSON result rather than throwing; that
+is translated into a tool error here, so an entitlement refusal or a missing
+record reads as a failure instead of a successful blob.
+
+Counts, for orientation:
+
+| Configuration | Tools |
+|---|---|
+| no operator set | 8 (shop only) |
+| operator set | 33 |
+| operator set + `CARELEO_MCP_ALLOW_WRITES=true` | 38 |
