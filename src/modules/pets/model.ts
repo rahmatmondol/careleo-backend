@@ -100,6 +100,33 @@ export const PetsModel = {
     return rows[0] ?? null;
   },
 
+  /** Fetch any pet by id with owner info — admin panel only, not owner-scoped. */
+  async getByIdForAdmin(petId: string) {
+    const rows = await db
+      .select({
+        id: pets.id,
+        name: pets.name,
+        type: pets.type,
+        breed: pets.breed,
+        gender: pets.gender,
+        dob: pets.dob,
+        weight: pets.weight,
+        photoUrl: pets.photoUrl,
+        createdAt: pets.createdAt,
+        updatedAt: pets.updatedAt,
+        userId: pets.userId,
+        ownerId: users.id,
+        ownerName: sql<string>`${users.firstName} || ' ' || ${users.lastName}`,
+        ownerEmail: users.email,
+        ownerAvatar: users.avatarUrl,
+      })
+      .from(pets)
+      .leftJoin(users, eq(pets.userId, users.id))
+      .where(eq(pets.id, petId))
+      .limit(1);
+    return rows[0] ?? null;
+  },
+
   /** Fetch a single user-owned pet by id. */
   async getById(userId: string, petId: string) {
     const rows = await db

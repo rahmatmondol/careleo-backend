@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
-import { ValidationError } from '@/shared/errors';
+import { NotFoundError, ValidationError } from '@/shared/errors';
 import { PetsModel } from './model';
 
 const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
@@ -137,6 +137,13 @@ export const PetsService = {
   async listAllForAdmin() {
     const rows = await PetsModel.listAllForAdmin();
     return { pets: rows };
+  },
+
+  /** Get any pet by id for the admin panel — not scoped to an owner. */
+  async getForAdmin(petId: string) {
+    const row = await PetsModel.getByIdForAdmin(petId);
+    if (!row) throw new NotFoundError('Pet not found');
+    return { pet: row };
   },
 
   /** Get single pet. */

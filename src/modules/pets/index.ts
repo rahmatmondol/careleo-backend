@@ -1,12 +1,28 @@
 import { Elysia } from 'elysia';
-import { requireAuth } from '@/shared/auth/guards';
+import { requireAuth, requireRole } from '@/shared/auth/guards';
 import { PetsService } from './service';
 
 export const petsController = new Elysia({ name: 'pets-controller' }).group('/pets', (app) =>
   app
     /** List all pets across system for admin. */
-    .get('/all', async () => {
+    .get('/all', async (ctx: any) => {
+      const { headers, jwt } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      requireRole(authUser, ['super_admin', 'admin', 'support']);
       return PetsService.listAllForAdmin();
+    })
+    /**
+     * Get any pet by id for the admin panel.
+     *
+     * Separate from `GET /:id` because that one is owner-scoped: an admin
+     * looking at a customer's pet is not its owner, so it 404s for them.
+     * Declared before `/:id` so it is not swallowed by the wildcard.
+     */
+    .get('/admin/:id', async (ctx: any) => {
+      const { headers, jwt, params } = ctx;
+      const authUser = await requireAuth(headers, jwt);
+      requireRole(authUser, ['super_admin', 'admin', 'support']);
+      return PetsService.getForAdmin(String(params.id));
     })
     /** List all pets for authenticated user. */
     .get('', async (ctx: any) => {
