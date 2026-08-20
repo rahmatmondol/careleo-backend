@@ -31,9 +31,8 @@ talks to the database, not to `:3000`.
 {
   "mcpServers": {
     "careleo": {
-      "command": "bun",
-      "args": ["run", "src/mcp/index.ts"],
-      "cwd": "/absolute/path/to/careleo-backend",
+      "command": "/absolute/path/to/bun",
+      "args": ["run", "/absolute/path/to/careleo-backend/src/mcp/index.ts"],
       "env": {
         "CARELEO_MCP_USER_EMAIL": "you@example.com"
       }
@@ -42,8 +41,17 @@ talks to the database, not to `:3000`.
 }
 ```
 
-`cwd` matters: Bun loads `.env` from the working directory, and that is where
-`DATABASE_URL` comes from.
+Both paths are absolute on purpose:
+
+- **The command.** An MCP client does not inherit your shell's `PATH`, so a
+  bare `"bun"` fails with `spawn bun ENOENT`. `which bun` gives you the path.
+- **The script.** Clients differ on whether they honour a `cwd` setting, and
+  Claude Desktop does not — a relative script path dies with
+  `Module not found "src/mcp/index.ts"`.
+
+There is deliberately no `cwd` requirement: the entrypoint reads `.env` from
+its own location in the repo rather than from the working directory, so it
+starts correctly wherever the client launches it from.
 
 Locally you can also just run `bun run mcp`.
 

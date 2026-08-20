@@ -21,18 +21,52 @@
  * Run:  bun run mcp
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { and, eq } from 'drizzle-orm';
-import { db } from '@/shared/db';
-import { roles, userRoles, users } from '@/shared/db/schema';
-import { AI_TOOL_DECLARATIONS, executeTool } from '@/modules/ai/tools';
-import * as attributeService from '@/modules/shop/services/admin/attribute.service';
-import * as brandService from '@/modules/shop/services/admin/brand.service';
-import * as categoryService from '@/modules/shop/services/admin/category.service';
-import * as productService from '@/modules/shop/services/admin/product.service';
+/**
+ * Load `.env` from the repository, not from the working directory.
+ *
+ * `src/index.ts` reads `process.cwd()/.env`, which is fine for a server you
+ * start yourself. This process is spawned by an MCP client, and clients differ
+ * on whether they honour a `cwd` setting at all — Claude Desktop does not — so
+ * a cwd-relative lookup silently loses `DATABASE_URL` and the server dies on
+ * its first query. Resolving from this file's own location works from
+ * anywhere, and lets the client point at an absolute script path.
+ *
+ * Must run before the modules below are imported, because they open the
+ * database connection at import time; hence the dynamic imports.
+ */
+const loadDotEnv = () => {
+  const envPath = resolve(import.meta.dir, '../../.env');
+  if (!existsSync(envPath)) return;
+  for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx === -1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let value = trimmed.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+};
+
+loadDotEnv();
+
+const { eq } = await import('drizzle-orm');
+const { db } = await import('@/shared/db');
+const { roles, userRoles, users } = await import('@/shared/db/schema');
+const { AI_TOOL_DECLARATIONS, executeTool } = await import('@/modules/ai/tools');
+const attributeService = await import('@/modules/shop/services/admin/attribute.service');
+const brandService = await import('@/modules/shop/services/admin/brand.service');
+const categoryService = await import('@/modules/shop/services/admin/category.service');
+const productService = await import('@/modules/shop/services/admin/product.service');
 
 type ToolResult = {
   content: { type: 'text'; text: string }[];
